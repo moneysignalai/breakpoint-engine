@@ -8,6 +8,7 @@ from sqlalchemy.orm import joinedload
 
 from src.config import get_settings
 from src.models.alert import Alert
+from src.services.alerts import send_telegram_message
 from src.services.db import session_scope, init_db
 from src.worker import run_scan_once
 
@@ -76,3 +77,9 @@ def latest_alerts(limit: int = 20) -> Dict[str, Any]:
 @app.get("/")
 def root() -> Dict[str, str]:
     return {"message": "Breakout engine alive"}
+
+
+@app.get("/debug/test-telegram")
+def test_telegram() -> Dict[str, bool]:
+    send_telegram_message("✅ Telegram test successful – Breakpoint Engine is live.")
+    return {"ok": True}
