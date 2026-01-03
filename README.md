@@ -26,7 +26,7 @@ See `src/config.py` for defaults.
 
 ## Local Development
 ```bash
-pip install -r requirements.txt  # ensure FastAPI, SQLAlchemy, httpx, loguru, pydantic-settings, pytz, numpy, pandas, pytest
+pip install -r requirements.txt
 export MASSIVE_API_KEY=demo
 export DATABASE_URL=sqlite:///./local.db
 uvicorn src.main:app --reload
@@ -40,11 +40,42 @@ Run tests:
 pytest
 ```
 
-## Render Deployment
-- **Web Service**: `uvicorn src.main:app --host 0.0.0.0 --port $PORT`
-- **Background Worker**: `python -m src.worker`
-- **Postgres**: Render managed; set `DATABASE_URL` accordingly.
-- Provide env vars in both service and worker. TELEGRAM_* optional; TELEGRAM_ENABLED defaults to false.
+## Deploy on Render
+Deploy either by importing the included Render Blueprint or by creating services manually.
+
+### Option A: Blueprint (recommended)
+1. Push this repository to your own GitHub account.
+2. In Render, choose **Blueprints → New Blueprint Instance** and point to `render.yaml` in this repo.
+3. Confirm the defaults:
+   - **Web service build**: `pip install -r requirements.txt`
+   - **Web service start**: `bash -lc "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"`
+   - **Worker start**: `bash -lc "alembic upgrade head && python -m src.worker"`
+4. Add required secrets when prompted (see env vars below) and launch.
+
+### Option B: Manual services
+1. Create a **Postgres** instance (e.g., `breakpoint-db`) and note the `DATABASE_URL`.
+2. Create a **Web Service** from this repo with:
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `bash -lc "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"`
+   - Health Check Path: `/health`
+3. Create a **Background Worker** from this repo with:
+   - Build Command: `pip install -r requirements.txt`
+   - Start Command: `bash -lc "alembic upgrade head && python -m src.worker"`
+4. Set identical environment variables on both services. Connect `DATABASE_URL` to the Render Postgres instance.
+
+### Environment variables
+Set on both the web service and worker (defaults come from `src/config.py`):
+
+- `MASSIVE_API_KEY` *(required)*
+- `DATABASE_URL` *(required; provided by Render Postgres connection string)*
+- `TELEGRAM_ENABLED` (default `false`)
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `TIMEZONE` (default `America/New_York`)
+- `RTH_ONLY` (default `true`)
+- `SCAN_INTERVAL_SECONDS` (default `60`)
+- `MIN_CONFIDENCE_TO_ALERT` (default `7.5`)
+- `UNIVERSE` (default `SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO`)
 
 ## API Endpoints
 - `GET /health` – basic status

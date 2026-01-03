@@ -1,0 +1,65 @@
+databases:
+  - name: breakpoint-db
+    plan: starter
+
+services:
+  - type: web
+    name: breakpoint-web
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash -lc "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: breakpoint-db
+          property: connectionString
+      - key: MASSIVE_API_KEY
+        sync: false
+      - key: TELEGRAM_ENABLED
+        value: "false"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TIMEZONE
+        value: "America/New_York"
+      - key: RTH_ONLY
+        value: "true"
+      - key: SCAN_INTERVAL_SECONDS
+        value: "60"
+      - key: MIN_CONFIDENCE_TO_ALERT
+        value: "7.5"
+      - key: UNIVERSE
+        value: "SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO"
+
+  - type: worker
+    name: breakpoint-worker
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash -lc "alembic upgrade head && python -m src.worker"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: breakpoint-db
+          property: connectionString
+      - key: MASSIVE_API_KEY
+        sync: false
+      - key: TELEGRAM_ENABLED
+        value: "false"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TIMEZONE
+        value: "America/New_York"
+      - key: RTH_ONLY
+        value: "true"
+      - key: SCAN_INTERVAL_SECONDS
+        value: "60"
+      - key: MIN_CONFIDENCE_TO_ALERT
+        value: "7.5"
+      - key: UNIVERSE
+        value: "SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO"
