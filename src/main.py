@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
+import platform
 from typing import Any, Dict
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from loguru import logger
 from sqlalchemy.orm import joinedload
 
@@ -10,10 +12,20 @@ from src.config import get_settings
 from src.models.alert import Alert
 from src.services.alerts import send_telegram_message
 from src.services.db import session_scope, init_db
+from src.utils import configure_logging
 from src.worker import run_scan_once
+
+configure_logging("web")
 
 app = FastAPI(title="Breakout Engine")
 settings = get_settings()
+DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() == "true"
+
+logger.info(
+    "web boot",
+    settings=settings.non_secret_dict(),
+    python_version=platform.python_version(),
+)
 init_db()
 
 
@@ -24,6 +36,13 @@ def health() -> Dict[str, str]:
 
 @app.get("/config")
 def config() -> Dict[str, Any]:
+    return settings.non_secret_dict()
+
+
+@app.get("/debug/settings")
+def debug_settings() -> Dict[str, Any]:
+    if not DEBUG_ENDPOINTS_ENABLED:
+        raise HTTPException(status_code=404)
     return settings.non_secret_dict()
 
 
