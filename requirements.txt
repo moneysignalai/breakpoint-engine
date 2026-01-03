@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+SQLAlchemy>=2.0
+alembic
+pydantic
+pydantic-settings
+loguru
+psycopg2-binary
