@@ -8,7 +8,7 @@ services:
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: bash -lc "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"
+    startCommand: bash -lc "export PYTHONPATH=. && alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
@@ -39,7 +39,7 @@ services:
     env: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: bash -lc "alembic upgrade head && python -m src.worker"
+    startCommand: bash -lc "export PYTHONPATH=. && alembic upgrade head && python -m src.worker"
     envVars:
       - key: DATABASE_URL
         fromDatabase:
