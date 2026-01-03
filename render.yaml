@@ -1,6 +1,6 @@
 databases:
   - name: breakpoint-db
-    plan: basic
+    plan: basic-1gb
 
 services:
   - type: web
