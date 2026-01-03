@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
 import asyncio
+import platform
+import time
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -18,8 +18,15 @@ from src.services.market_time import in_allowed_window, is_rth
 from src.services.massive_client import MassiveClient
 from src.strategies.flagship import FlagshipStrategy
 from src.strategies.option_optimizer import OptionOptimizer, OptionPick
+from src.utils import configure_logging
 
+configure_logging("worker")
 settings = get_settings()
+logger.info(
+    "worker boot",
+    settings=settings.non_secret_dict(),
+    python_version=platform.python_version(),
+)
 
 
 def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
@@ -28,9 +35,17 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     optimizer = OptionOptimizer()
 
     started_at = datetime.utcnow()
+    scan_start = time.perf_counter()
     scan_notes = []
     errors = 0
     alerts_triggered: List[Dict[str, Any]] = []
+
+    logger.info(
+        "scan start",
+        universe_size=len(settings.universe_list()),
+        rth_only=settings.RTH_ONLY,
+        is_rth=is_rth(),
+    )
 
     with session_scope() as session:
         scan_run = ScanRun(started_at=started_at, finished_at=None, universe=settings.UNIVERSE, symbols_scanned=[])
@@ -43,21 +58,87 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             return {"alerts": [], "notes": "Outside RTH"}
 
         market_symbol = "QQQ"
-        market_bars = client.get_bars(market_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
+        try:
+            market_bars_start = time.perf_counter()
+            market_bars = client.get_bars(market_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
+            logger.info(
+                "market bars fetched",
+                symbol=market_symbol,
+                duration_ms=int((time.perf_counter() - market_bars_start) * 1000),
+                bars=len(market_bars),
+            )
+        except Exception:
+            logger.exception("market bars fetch failed", symbol=market_symbol)
+            raise
 
         for symbol in settings.universe_list():
             try:
-                bars = client.get_bars(symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
-                daily = client.get_daily_snapshot(symbol)
+                bars_start = time.perf_counter()
+                try:
+                    bars = client.get_bars(symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
+                except Exception:
+                    logger.exception("bars fetch failed", symbol=symbol)
+                    raise
+                logger.info(
+                    "bars fetched",
+                    symbol=symbol,
+                    duration_ms=int((time.perf_counter() - bars_start) * 1000),
+                    bars=len(bars),
+                )
+
+                daily_start = time.perf_counter()
+                try:
+                    daily = client.get_daily_snapshot(symbol)
+                except Exception:
+                    logger.exception("daily snapshot failed", symbol=symbol)
+                    raise
+                logger.debug(
+                    "daily snapshot fetched",
+                    symbol=symbol,
+                    duration_ms=int((time.perf_counter() - daily_start) * 1000),
+                )
+
                 idea = strategy.evaluate(symbol, bars, daily, market_bars)
                 if not idea:
+                    logger.info("strategy skipped", symbol=symbol)
                     continue
 
-                expirations = client.get_option_expirations(symbol)
+                logger.info(
+                    "strategy passed",
+                    symbol=symbol,
+                    direction=idea.direction,
+                    confidence=idea.confidence,
+                )
+
+                expirations_start = time.perf_counter()
+                try:
+                    expirations = client.get_option_expirations(symbol)
+                except Exception:
+                    logger.exception("expirations fetch failed", symbol=symbol)
+                    raise
+                logger.info(
+                    "expirations fetched",
+                    symbol=symbol,
+                    duration_ms=int((time.perf_counter() - expirations_start) * 1000),
+                    expirations=len(expirations),
+                )
                 iv_pct = daily.get('iv_percentile') if isinstance(daily, dict) else None
 
                 def load_chain(exp: str):
-                    return client.get_option_chain(symbol, exp)
+                    chain_start = time.perf_counter()
+                    try:
+                        chain = client.get_option_chain(symbol, exp)
+                    except Exception:
+                        logger.exception("option chain failed", symbol=symbol, expiration=exp)
+                        raise
+                    logger.debug(
+                        "option chain fetched",
+                        symbol=symbol,
+                        expiration=exp,
+                        duration_ms=int((time.perf_counter() - chain_start) * 1000),
+                        contracts=len(chain),
+                    )
+                    return chain
 
                 opt_result = optimizer.run(symbol, idea.direction, idea.expected_window, bars[-1]['ts'] if isinstance(bars[-1]['ts'], datetime) else datetime.fromisoformat(bars[-1]['ts']), expirations, load_chain, iv_percentile=iv_pct)
 
@@ -69,7 +150,20 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 else:
                     option_picks = opt_result.candidates
 
+                logger.info(
+                    "optimizer result",
+                    symbol=symbol,
+                    stock_only=opt_result.stock_only,
+                    candidate_count=len(option_picks),
+                )
+
                 if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
+                    logger.info(
+                        "alert threshold not met",
+                        symbol=symbol,
+                        confidence=confidence,
+                        min_confidence=settings.MIN_CONFIDENCE_TO_ALERT,
+                    )
                     continue
 
                 alert_dict = {
@@ -117,6 +211,12 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
                 texts = alert_service.build_alert_texts(alert_dict, option_payloads if option_payloads else None)
                 status_code, tg_resp = alert_service.send_telegram_message(texts['short'])
+                logger.info(
+                    "telegram send",
+                    symbol=symbol,
+                    status_code=status_code,
+                    response=tg_resp,
+                )
 
                 alert_row = Alert(
                     symbol=symbol,
@@ -144,6 +244,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 )
                 session.add(alert_row)
                 session.flush()
+                logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
 
                 for op in option_payloads:
                     oc = OptionCandidate(alert_id=alert_row.id, **op)
@@ -158,6 +259,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         scan_run.finished_at = datetime.utcnow()
         scan_run.symbols_scanned = settings.universe_list()
         scan_run.errors_count = errors
+
+    duration_ms = int((time.perf_counter() - scan_start) * 1000)
+    logger.info(
+        "scan end",
+        duration_ms=duration_ms,
+        alerts_triggered=len(alerts_triggered),
+        errors_count=errors,
+    )
 
     return {"alerts": alerts_triggered, "notes": scan_notes}
 

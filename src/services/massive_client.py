@@ -21,12 +21,41 @@ class MassiveClient:
     def _request(self, method: str, path: str, params: dict | None = None) -> Any:
         backoff = 1.0
         for attempt in range(3):
+            start = time.perf_counter()
             try:
                 response = self.client.request(method, f"{self.base_url}{path}", params=params)
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
+                if response.status_code != 200:
+                    snippet = response.text[:300] if response.text else ""
+                    logger.warning(
+                        "Massive request non-200",
+                        endpoint=path,
+                        status_code=response.status_code,
+                        elapsed_ms=elapsed_ms,
+                        response_snippet=snippet,
+                    )
                 response.raise_for_status()
+                logger.debug(
+                    "Massive request ok",
+                    endpoint=path,
+                    status_code=response.status_code,
+                    elapsed_ms=elapsed_ms,
+                )
                 return response.json()
             except Exception as exc:  # noqa: BLE001
-                logger.error(f"Massive API error {path} attempt {attempt+1}: {exc}")
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
+                snippet = ""
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                    snippet = exc.response.text[:300]
+                logger.warning(
+                    "Massive request error",
+                    endpoint=path,
+                    status_code=getattr(getattr(exc, "response", None), "status_code", None),
+                    elapsed_ms=elapsed_ms,
+                    error=str(exc),
+                    response_snippet=snippet,
+                    attempt=attempt + 1,
+                )
                 if attempt == 2:
                     raise
                 time.sleep(backoff)
