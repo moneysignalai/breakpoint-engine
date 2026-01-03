@@ -1,123 +1,116 @@
 # Breakpoint Engine
 
-A single flagship strategy implementation: **Compression → Expansion Breakout (Stock-led, Options-optimized)**. Runs a FastAPI web service with a Render worker that scans equities, logs results to Postgres, and produces actionable stock + options alerts with deterministic scoring.
+## Executive Overview (Investor-Friendly)
+Breakpoint Engine is an alert intelligence system that monitors liquid equities intraday and surfaces high-conviction moments where price, volume, and market context align. It exists to remove guesswork and emotion from short-term trading by applying the same rules on every scan. Traders keep control of execution; the engine supplies disciplined, repeatable alerts that emphasize risk awareness over impulse.
 
-## Strategy Overview
-- Timeframe: 5m bars, compression box of 12 bars.
-- Filters: price/volume sanity, ATR compression, volume contraction, tight range, box integrity, and market bias gate (VWAP + trend, chop/panic detection).
-- Trigger: close beyond box with volume and extension guards; VWAP confirmation optional.
-- Trade idea: buffered entry/stop, R-multiples for T1/T2, expected window based on time of day.
-- Confidence: base 7.0 plus deterministic adds for market alignment, breakout quality, candle position; capped and penalized for weak options liquidity.
-- Options: optimizer selects three tiers (Conservative/Standard/Aggressive) honoring spreads, volume/OI, delta bands, IV thresholds, and expiry windows.
+Modern discretionary trading often suffers from inconsistent decision-making. Breakpoint Engine addresses this by enforcing automation and pre-defined criteria, ensuring that alerts are generated only when a structured checklist is satisfied. Automation plus discipline reduces emotional drift, creates auditability, and scales without diluting the quality of insights. The system delivers timely, actionable context rather than promising profits or selling signals.
 
-## Required Environment Variables
-See `src/config.py` for defaults.
-- `MASSIVE_API_KEY`
-- `DATABASE_URL`
-- `TELEGRAM_ENABLED` (default false)
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `SCAN_INTERVAL_SECONDS` (default 60)
-- `UNIVERSE` (comma tickers; default includes SPY/QQQ/IWM and megacaps)
-- `RTH_ONLY` (default true)
-- `MIN_CONFIDENCE_TO_ALERT` (default 7.5)
-- `TIMEZONE` (default America/New_York)
-- Optional tuning knobs: pricing/volume thresholds, box/ATR/volume factors, breakout buffers, VWAP confirm, option liquidity and IV guards, allowed windows.
+--------------------------------------------------
+## What Makes Breakpoint Engine Different
+- **One flagship setup**: The engine centers on a single compression-to-expansion breakout framework. Focusing on one setup enables deep guardrails, consistent evaluation, and clear expectations instead of a patchwork of loosely tested ideas.
+- **Avoiding strategy sprawl**: Many bots juggle too many half-finished strategies and produce noisy pings. Breakpoint only scans for high-conviction market moments that meet strict structure, liquidity, and volatility requirements.
+- **Actionable, not spammy**: Alerts are throttled by deterministic scoring and minimum confidence gates. Each alert contains the reasoning and risk notes needed for a trader to act—or pass—with clarity.
 
-## Local Development
-```bash
-pip install -r requirements.txt
-export MASSIVE_API_KEY=demo
-export DATABASE_URL=sqlite:///./local.db
-uvicorn src.main:app --reload
+--------------------------------------------------
+## System Architecture (Technical Overview)
+Breakpoint Engine is implemented in Python 3.11 for stability and modern typing support. The system is split into a stateless FastAPI web service and a background worker that runs the scanning and evaluation loop. Persistence is handled by PostgreSQL with Alembic migrations to keep schemas consistent. Alerts are delivered via Telegram, and the full stack is deployable on Render.
+
 ```
-Run worker loop once manually:
-```bash
-python -m src.worker
-```
-Run tests:
-```bash
-pytest
+                +---------------------+
+                |   Telegram Client   |
+                +----------+----------+
+                           ^
+                           |
++-----------+      +-------+--------+      +----------------+
+| Massive   | ---> | Background     | ---> | PostgreSQL     |
+| Market API|      | Worker (scan)  |      | (alerts, runs) |
++-----------+      +-------+--------+      +----------------+
+                           |
+                           v
+                  +--------+-------+
+                  | FastAPI Web    |
+                  | Service        |
+                  +--------+-------+
+                           |
+                           v
+                       Render Cloud
 ```
 
-## Deploy on Render
-Deploy either by importing the included Render Blueprint or by creating services manually.
+Key characteristics:
+- **FastAPI web service** (`src/main.py`) exposes health, config, latest alerts, and a manual scan trigger.
+- **Background worker** (`src/worker.py`) runs the flagship strategy on a schedule; evaluation logic is deterministic and stateless between scans, drawing fresh data each cycle.
+- **PostgreSQL + Alembic** store alerts, option candidates, and scan metadata with controlled migrations.
+- **Telegram delivery** is optional and controlled via environment flags, ensuring safe defaults when disabled.
+- **Render deployment** uses separate web and worker services defined in `render.yaml` with health checks and shared environment configuration.
 
-### Option A: Blueprint (recommended)
-1. Push this repository to your own GitHub account.
-2. In Render, choose **Blueprints → New Blueprint Instance** and point to `render.yaml` in this repo.
-3. Confirm the defaults:
-   - **Web service build**: `pip install -r requirements.txt`
-   - **Web service start**: `bash -lc "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"`
-   - **Worker start**: `bash -lc "alembic upgrade head && python -m src.worker"`
-4. Add required secrets when prompted (see env vars below) and launch.
+--------------------------------------------------
+## Flagship Strategy Philosophy (No Trade Secrets)
+Breakpoint Engine evaluates the underlying stock first. It looks for periods where liquidity, volatility compression, and directional momentum align, signaling potential breakouts. Options are treated as derivatives of the stock thesis: contracts are only considered when the stock setup is valid and when liquidity and spreads meet guardrails.
 
-### Option B: Manual services
-1. Create a **Postgres** instance (e.g., `breakpoint-db`) and note the `DATABASE_URL`.
-2. Create a **Web Service** from this repo with:
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `bash -lc "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT"`
-   - Health Check Path: `/health`
-3. Create a **Background Worker** from this repo with:
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `bash -lc "alembic upgrade head && python -m src.worker"`
-4. Set identical environment variables on both services. Connect `DATABASE_URL` to the Render Postgres instance.
+The system can emit stock-only alerts when options liquidity is insufficient, option-focused context when contracts are viable, or combined alerts when both align. Proprietary thresholds and formulas remain internal, but the flow is consistent: validate the stock structure → confirm volume and market bias → evaluate extension risk →, if qualified, select options that mirror the stock thesis.
 
-### Environment variables
-Set on both the web service and worker (defaults come from `src/config.py`):
+--------------------------------------------------
+## Alert Types
+- **Stock alerts**: Triggered when the stock meets the flagship setup with adequate confidence. Suitable for traders who prefer equity exposure or who want to handle derivatives themselves.
+- **Options alerts**: Generated when the stock qualifies and options liquidity/spread criteria are met. Includes contract context without forcing execution.
+- **Combined alerts**: Provide both stock structure and vetted option candidates so traders can choose the instrument that fits their risk tolerance.
 
-- `MASSIVE_API_KEY` *(required)*
-- `DATABASE_URL` *(required; provided by Render Postgres connection string)*
-- `TELEGRAM_ENABLED` (default `false`)
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `TIMEZONE` (default `America/New_York`)
-- `RTH_ONLY` (default `true`)
-- `SCAN_INTERVAL_SECONDS` (default `60`)
-- `MIN_CONFIDENCE_TO_ALERT` (default `7.5`)
-- `UNIVERSE` (default `SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO`)
+Traders may take the stock only, use the stock signal to select their own contracts, or reference the provided option context as guidance. Execution choices remain with the user.
 
-## API Endpoints
-- `GET /health` – basic status
-- `GET /config` – non-secret runtime config
-- `POST /run-scan` – one-shot scan (debug/manual)
-- `GET /latest-alerts?limit=20` – latest alerts with option candidates
+--------------------------------------------------
+## Alert Format (STANDARD TEMPLATE)
+A typical Telegram alert follows this structure:
 
-## Example Output
-`POST /run-scan` returns JSON such as:
-```json
-{"alerts": [{"symbol": "NVDA", "direction": "LONG", "confidence": 8.0}], "notes": []}
-```
+⚡ BREAKPOINT ALERT — TICKER  
+📊 Direction: Bullish  
+🧠 Setup: Breakpoint Momentum  
+⏱ Timeframe: Intraday / Short-term  
 
-Standard alert sample:
-```
-🔥 BREAKPOINT TRIGGER — NVDA
+📈 STOCK CONTEXT  
+• Price: $XXX.XX  
+• VWAP: Above  
+• Trend: Higher Lows  
+• Volume: Elevated vs baseline  
 
-SETUP
-• Tight compression box resolved with expansion
-• Range: 1.05% (last 12 × 5m bars)
-• Breakout close: +0.20% beyond box
-• Volume: 1.60× box average
-• VWAP: Confirmed
-• Market bias: Bullish
+🎯 OPTIONS CONTEXT (If Applicable)  
+• Contract: 100C  
+• Expiration: 2024-12-20  
+• Liquidity: Sufficient  
+• Premium Range: $1.10 – $1.30  
 
-STOCK PLAN
-• Entry: 454.70 (hold above)
-• Invalidation: 453.80 (back inside box)
-• Target 1: 455.60
-• Target 2: 456.50
-• Expected window: Same day → 1–3 days
+🧭 RISK NOTES  
+• Not a market order  
+• Wait for confirmation  
+• Manage position size  
 
-OPTIONS (LIQUID / WEEKLY)
-• Conservative: 455C (5 DTE | Δ 0.55 | Mid 2.50 | Sprd 4.00%)
-• Standard:     460C (5 DTE | Δ 0.40 | Mid 1.70 | Sprd 5.00%)
-• Aggressive:   465C (5 DTE | Δ 0.30 | Mid 1.10 | Sprd 6.00%)
+⚠️ Alerts are informational, not financial advice.
 
-RISK NOTES
-• Take 40–60% at T1
-• Runner to T2
-• Time stop: exit if no continuation in 30–60 min
-• Exit on invalidation (back inside box)
+--------------------------------------------------
+## Risk & Compliance Disclosure
+Breakpoint Engine issues informational alerts only. They are not trading advice or execution instructions. Markets carry risk, and users are responsible for their own orders, position sizing, and outcomes. The system does not automate trades or guarantee performance. Past alerts do not predict future results.
 
-Confidence: 8.0 / 10
-```
+--------------------------------------------------
+## Deployment & Reliability
+- **Render cloud deployment** with separate web and worker services, each built from the same codebase and sharing environment variables.
+- **Health checks** on the FastAPI service for uptime monitoring.
+- **Environment control** via configuration flags for scan intervals, trading hours gating, and enabling/disabling Telegram.
+- **Safety defaults** keep Telegram disabled unless credentials are provided.
+- **Database-backed logging** records every alert and scan run for auditability and post-trade review.
+
+--------------------------------------------------
+## Who This Is For
+- Active traders who want structured, repeatable intraday setups.
+- Options traders who anchor decisions to the underlying stock first.
+- Stock-first traders who occasionally layer options when liquidity permits.
+- Practitioners who value discipline and clarity over hype and opaque promises.
+
+--------------------------------------------------
+## Roadmap (High-Level, Honest)
+- Additional alert types that extend the flagship philosophy without diluting quality.
+- Expanded analytics for post-alert outcomes and behavior tracking.
+- UI dashboards for monitoring scans, alert history, and configuration.
+- Performance review tooling to evaluate adherence to plans and risk controls.
+
+--------------------------------------------------
+## Closing Statement
+Breakpoint Engine is built on discipline, transparency, and a focused playbook. By enforcing structure and surfacing only the most compelling setups, it helps traders operate with clarity and repeatability. The long-term vision is a resilient alert infrastructure that scales while keeping risk-awareness at its core.
