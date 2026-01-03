@@ -58,18 +58,35 @@ pytest
 {"alerts": [{"symbol": "NVDA", "direction": "LONG", "confidence": 8.0}], "notes": []}
 ```
 
-Deep dive alert sample:
+Standard alert sample:
 ```
-NVDA LONG compression breakout
-Box: 450.00-454.50 (range 1.00%)
-Trigger close beyond box: 0.15% beyond edge
-Breakout volume: 1.60x box avg
-ATR compression ratio: 0.70
-VWAP confirmation: True
-Market bias: LONG
-Plan: entry 454.70 stop 453.80 T1 455.60 T2 456.50 (conf 8.0)
-Conservative: NVDA 2024-01-12 455C mid 2.50 sprd 4.0% vol 1200 oi 3200 delta 0.55
-Standard: NVDA 2024-01-12 460C mid 1.70 sprd 5.0% vol 900 oi 2800 delta 0.40
-Aggressive: NVDA 2024-01-12 465C mid 1.10 sprd 6.0% vol 700 oi 2000 delta 0.30
-Exit: Take 40-60% at T1, runner to T2, time stop 30-60m if no continuation, exit on invalidation
+🔥 BREAKPOINT TRIGGER — NVDA
+
+SETUP
+• Tight compression box resolved with expansion
+• Range: 1.05% (last 12 × 5m bars)
+• Breakout close: +0.20% beyond box
+• Volume: 1.60× box average
+• VWAP: Confirmed
+• Market bias: Bullish
+
+STOCK PLAN
+• Entry: 454.70 (hold above)
+• Invalidation: 453.80 (back inside box)
+• Target 1: 455.60
+• Target 2: 456.50
+• Expected window: Same day → 1–3 days
+
+OPTIONS (LIQUID / WEEKLY)
+• Conservative: 455C (5 DTE | Δ 0.55 | Mid 2.50 | Sprd 4.00%)
+• Standard:     460C (5 DTE | Δ 0.40 | Mid 1.70 | Sprd 5.00%)
+• Aggressive:   465C (5 DTE | Δ 0.30 | Mid 1.10 | Sprd 6.00%)
+
+RISK NOTES
+• Take 40–60% at T1
+• Runner to T2
+• Time stop: exit if no continuation in 30–60 min
+• Exit on invalidation (back inside box)
+
+Confidence: 8.0 / 10
 ```
