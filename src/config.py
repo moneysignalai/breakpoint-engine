@@ -8,7 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_prefix='', case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
     MASSIVE_API_KEY: str
     DATABASE_URL: str
@@ -56,3 +56,6 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+# Quick self-check:
+# python -c "from src.config import get_settings; print(get_settings().model_dump() if hasattr(get_settings(), 'model_dump') else 'ok')"
