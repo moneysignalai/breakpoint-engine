@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import re
 from typing import Any, Dict
 
 import httpx
@@ -27,41 +29,288 @@ def send_telegram_message(text: str) -> tuple[int | None, str]:
         return None, str(exc)
 
 
-def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | None = None) -> dict[str, str]:
-    symbol = alert['symbol']
-    direction = alert['direction']
-    entry = alert['entry']
-    stop = alert['stop']
-    t1 = alert['t1']
-    t2 = alert['t2']
-    confidence = alert['confidence']
-    box_high = alert['box_high']
-    box_low = alert['box_low']
-    break_vol_mult = alert['break_vol_mult']
-    range_pct = alert['range_pct']
-    atr_ratio = alert['atr_ratio']
-    extension_pct = alert['extension_pct']
-    vwap_ok = alert['vwap_ok']
-    market_bias = alert.get('market_bias')
+def _format_price(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
 
-    short = f"{symbol} {direction} entry {entry:.2f} stop {stop:.2f} T1 {t1:.2f} T2 {t2:.2f} (conf {confidence:.1f})"
-    medium = short + f" box[{box_low:.2f}-{box_high:.2f}] volx{break_vol_mult:.2f} range {range_pct*100:.2f}% atr_ratio {atr_ratio:.2f}"
+
+def _format_percent(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _format_delta(value: Any) -> str:
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _normalize_call_put(value: Any) -> str | None:
+    if not value:
+        return None
+    if isinstance(value, str) and value:
+        cp = value.strip().upper()
+        if cp in {"C", "CALL"}:
+            return "C"
+        if cp in {"P", "PUT"}:
+            return "P"
+    return None
+
+
+def _parse_strike_and_cp(contract_symbol: str) -> tuple[str | None, str | None]:
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)([CP])$", contract_symbol)
+    if not match:
+        return None, None
+    return match.group(1), match.group(2)
+
+
+def _format_spread_percent(option: dict[str, Any]) -> str:
+    spread_pct = option.get("spread_pct")
+    if spread_pct is not None:
+        try:
+            return f"{float(spread_pct) * 100:.2f}"
+        except (TypeError, ValueError):
+            return "N/A"
+
+    bid = option.get("bid")
+    ask = option.get("ask")
+    try:
+        if bid is not None and ask is not None:
+            bid_f = float(bid)
+            ask_f = float(ask)
+            if bid_f >= 0 and ask_f >= 0 and (bid_f + ask_f) > 0:
+                mid = (bid_f + ask_f) / 2
+                if mid > 0:
+                    return f"{((ask_f - bid_f) / mid) * 100:.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+    return "N/A"
+
+
+def _format_mid(option: dict[str, Any]) -> str:
+    mid = option.get("mid")
+    try:
+        if mid is not None:
+            return f"{float(mid):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+    bid = option.get("bid")
+    ask = option.get("ask")
+    try:
+        if bid is not None and ask is not None:
+            return f"{(float(bid) + float(ask)) / 2:.2f}"
+    except (TypeError, ValueError):
+        return "N/A"
+    return "N/A"
+
+
+def _format_dte(expiry: Any, alert: Dict[str, Any]) -> str:
+    if not expiry:
+        return "DTE N/A"
+    alert_ts = alert.get("ts") or alert.get("triggered_at")
+    trigger_dt: datetime
+    try:
+        if isinstance(alert_ts, datetime):
+            trigger_dt = alert_ts
+        elif isinstance(alert_ts, str):
+            trigger_dt = datetime.fromisoformat(alert_ts)
+        else:
+            trigger_dt = datetime.now(timezone.utc)
+    except Exception:
+        trigger_dt = datetime.now(timezone.utc)
+
+    try:
+        if isinstance(expiry, datetime):
+            expiry_dt = expiry
+        elif isinstance(expiry, str):
+            expiry_dt = datetime.fromisoformat(expiry)
+        else:
+            return "DTE N/A"
+        dte = (expiry_dt.date() - trigger_dt.date()).days
+        if dte < 0:
+            return "DTE N/A"
+        return f"{dte} DTE"
+    except Exception:
+        return "DTE N/A"
+
+
+def _format_option_line(option: dict[str, Any], alert: Dict[str, Any]) -> str:
+    strike_val = option.get("strike")
+    strike_display: str | None = None
+    cp_display = _normalize_call_put(option.get("call_put"))
+
+    if strike_val is None or cp_display is None:
+        cs = option.get("contract_symbol")
+        if cs:
+            parsed_strike, parsed_cp = _parse_strike_and_cp(str(cs))
+            if strike_val is None:
+                strike_val = parsed_strike
+            if cp_display is None:
+                cp_display = parsed_cp
+
+    try:
+        if strike_val is not None and float(strike_val).is_integer():
+            strike_display = f"{int(float(strike_val))}"
+        elif strike_val is not None:
+            strike_display = f"{float(strike_val):.2f}"
+    except (TypeError, ValueError):
+        strike_display = str(strike_val) if strike_val is not None else None
+
+    if not strike_display:
+        strike_display = option.get("contract_symbol", "N/A")
+
+    cp_display = cp_display or "?"
+    delta_display = _format_delta(option.get("delta"))
+    mid_display = _format_mid(option)
+    spread_display_raw = _format_spread_percent(option)
+    spread_display = f"{spread_display_raw}%" if spread_display_raw != "N/A" else "N/A"
+    dte_display = _format_dte(option.get("expiry"), alert)
+
+    return f"{strike_display}{cp_display} ({dte_display} | Δ {delta_display} | Mid {mid_display} | Sprd {spread_display})"
+
+
+def _format_market_bias(value: Any) -> str:
+    if value in {"LONG", "Bullish"}:
+        return "Bullish"
+    if value in {"SHORT", "Bearish"}:
+        return "Bearish"
+    if value is None:
+        return "Unknown"
+    return str(value)
+
+
+def _format_expected_window(value: Any) -> str:
+    mapping = {
+        "same_day": "Same day → 1–3 days",
+        "1_3_days": "1–3 days",
+        "5_10_days": "5–10 days",
+    }
+    return mapping.get(value, "Unknown")
+
+
+def _format_vwap(value: Any) -> str:
+    if value is True:
+        return "Confirmed"
+    if value is False:
+        return "Not confirmed"
+    return "Unknown"
+
+
+def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | None = None) -> dict[str, str]:
+    symbol = alert.get("symbol", "?")
+    direction = alert.get("direction", "?")
+    entry = alert.get("entry")
+    stop = alert.get("stop")
+    t1 = alert.get("t1")
+    t2 = alert.get("t2")
+    confidence = alert.get("confidence")
+    box_high = alert.get("box_high")
+    box_low = alert.get("box_low")
+    break_vol_mult = alert.get("break_vol_mult")
+    range_pct = alert.get("range_pct")
+    atr_ratio = alert.get("atr_ratio")
+    extension_pct = alert.get("extension_pct")
+    vwap_ok = alert.get("vwap_ok")
+    market_bias = alert.get("market_bias")
+    expected_window = alert.get("expected_window")
+
+    short = (
+        f"{symbol} {direction} entry {_format_price(entry)} stop {_format_price(stop)} "
+        f"T1 {_format_price(t1)} T2 {_format_price(t2)} (conf {float(confidence):.1f})"
+        if confidence is not None
+        else f"{symbol} {direction} entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)}"
+    )
+
+    entry_phrase = "hold above" if str(direction).upper() != "SHORT" else "hold below"
+    vwap_text = _format_vwap(vwap_ok)
+    bias_text = _format_market_bias(market_bias)
+    expected_window_text = _format_expected_window(expected_window)
+
+    standard_lines = [
+        f"🔥 BREAKPOINT TRIGGER — {symbol}",
+        "",
+        "SETUP",
+        f"• Tight compression box resolved with expansion",
+        f"• Range: {_format_percent(range_pct)}% (last {settings.BOX_BARS} × 5m bars)",
+        f"• Breakout close: +{_format_percent(extension_pct)}% beyond box",
+        f"• Volume: {break_vol_mult:.2f}× box average" if isinstance(break_vol_mult, (int, float)) else "• Volume: N/A",
+        f"• VWAP: {vwap_text}",
+        f"• Market bias: {bias_text}",
+        "",
+        "STOCK PLAN",
+        f"• Entry: {_format_price(entry)} ({entry_phrase})",
+        f"• Invalidation: {_format_price(stop)} (back inside box)",
+        f"• Target 1: {_format_price(t1)}",
+        f"• Target 2: {_format_price(t2)}",
+        f"• Expected window: {expected_window_text}",
+        "",
+    ]
+
+    if options:
+        standard_lines.append("OPTIONS (LIQUID / WEEKLY)")
+        tier_map: dict[str, dict[str, Any]] = {}
+        for opt in options:
+            opt_with_alert = {**opt, "alert": alert}
+            tier = str(opt.get("tier", "")).lower()
+            tier_map[tier] = opt_with_alert
+
+        tiers = ["Conservative", "Standard", "Aggressive"]
+        pad = max(len(t) for t in tiers)
+        for tier in tiers:
+            opt = tier_map.get(tier.lower(), {})
+            opt.setdefault("tier", tier)
+            opt.setdefault("alert", alert)
+            details = _format_option_line(opt, alert)
+            standard_lines.append(f"• {tier}: {' ' * (pad - len(tier))}{details}")
+    else:
+        standard_lines.append("OPTIONS: stock-only (no liquid contracts / IV too high / unavailable)")
+
+    standard_lines.extend(
+        [
+            "",
+            "RISK NOTES",
+            "• Take 40–60% at T1",
+            "• Runner to T2",
+            "• Time stop: exit if no continuation in 30–60 min",
+            "• Exit on invalidation (back inside box)",
+            "",
+            f"Confidence: {float(confidence):.1f} / 10" if confidence is not None else "Confidence: N/A",
+        ]
+    )
+
+    standard = "\n".join(standard_lines)
 
     deep_lines = [
         f"{symbol} {direction} compression breakout",
-        f"Box: {box_low:.2f}-{box_high:.2f} (range {range_pct*100:.2f}%)",
-        f"Trigger close beyond box: {extension_pct*100:.2f}% beyond edge",
-        f"Breakout volume: {break_vol_mult:.2f}x box avg",
-        f"ATR compression ratio: {atr_ratio:.2f}",
+        f"Box: {_format_price(box_low)}-{_format_price(box_high)} (range {_format_percent(range_pct)}%)",
+        f"Trigger close beyond box: {_format_percent(extension_pct)}% beyond edge",
+        f"Breakout volume: {_format_price(break_vol_mult)}x box avg",
+        f"ATR compression ratio: {_format_price(atr_ratio)}",
         f"VWAP confirmation: {vwap_ok}",
         f"Market bias: {market_bias}",
-        f"Plan: entry {entry:.2f} stop {stop:.2f} T1 {t1:.2f} T2 {t2:.2f} (conf {confidence:.1f})",
+        f"Plan: entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)} (conf {confidence:.1f})" if confidence is not None else f"Plan: entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)}",
     ]
     if options:
         for opt in options:
+            spread_display = _format_spread_percent(opt)
+            try:
+                spread_display = float(spread_display)
+                spread_display_str = f"{spread_display:.1f}"
+            except (TypeError, ValueError):
+                spread_display_str = "N/A"
             deep_lines.append(
-                f"{opt['tier']}: {opt['contract_symbol']} mid {opt['mid']:.2f} sprd {opt['spread_pct']*100:.1f}% vol {opt['volume']} oi {opt['oi']} delta {opt.get('delta')}"
+                f"{opt.get('tier')}: {opt.get('contract_symbol')} mid {_format_mid(opt)} sprd {spread_display_str}% vol {opt.get('volume')} oi {opt.get('oi')} delta {opt.get('delta')}"
             )
     deep_lines.append("Exit: Take 40-60% at T1, runner to T2, time stop 30-60m if no continuation, exit on invalidation")
     deep = "\n".join(deep_lines)
-    return {"short": short, "medium": medium, "deep_dive": deep}
+
+    texts = {"short": short, "standard": standard, "deep": deep}
+    texts["medium"] = standard
+    texts["deep_dive"] = deep
+    return texts
