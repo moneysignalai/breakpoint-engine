@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
@@ -10,7 +11,7 @@ from sqlalchemy.orm import joinedload
 
 from src.config import get_settings
 from src.models.alert import Alert
-from src.services.alerts import send_telegram_message
+from src.services.alerts import build_alert_texts, send_telegram_message
 from src.services.db import session_scope, init_db
 from src.utils import configure_logging
 from src.worker import run_scan_once
@@ -102,3 +103,81 @@ def root() -> Dict[str, str]:
 def test_telegram() -> Dict[str, bool]:
     send_telegram_message("✅ Telegram test successful – Breakpoint Engine is live.")
     return {"ok": True}
+
+
+@app.post("/debug/send-sample-alert")
+def send_sample_alert() -> Dict[str, bool]:
+    if not DEBUG_ENDPOINTS_ENABLED:
+        raise HTTPException(status_code=404)
+
+    logger.info("debug sample alert requested")
+
+    sample_alert = {
+        "symbol": "SPY",
+        "direction": "LONG",
+        "entry": 525.25,
+        "stop": 519.5,
+        "t1": 533.0,
+        "t2": 540.0,
+        "confidence": 7.8,
+        "box_high": 522.0,
+        "box_low": 518.0,
+        "range_pct": 0.0076,
+        "atr_ratio": 1.2,
+        "break_vol_mult": 2.4,
+        "extension_pct": 0.0035,
+        "vwap_ok": True,
+        "market_bias": "Bullish",
+        "expected_window": "1_3_days",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+    sample_options = [
+        {
+            "tier": "Conservative",
+            "contract_symbol": "SPY240621C520",
+            "expiry": datetime.now(timezone.utc).date().isoformat(),
+            "strike": 520,
+            "call_put": "C",
+            "bid": 6.85,
+            "ask": 7.05,
+            "volume": 1123,
+            "oi": 20450,
+            "delta": 0.45,
+        },
+        {
+            "tier": "Standard",
+            "contract_symbol": "SPY240621C525",
+            "expiry": datetime.now(timezone.utc).date().isoformat(),
+            "strike": 525,
+            "call_put": "C",
+            "bid": 4.35,
+            "ask": 4.55,
+            "volume": 8420,
+            "oi": 35670,
+            "delta": 0.38,
+        },
+        {
+            "tier": "Aggressive",
+            "contract_symbol": "SPY240621C530",
+            "expiry": datetime.now(timezone.utc).date().isoformat(),
+            "strike": 530,
+            "call_put": "C",
+            "bid": 2.35,
+            "ask": 2.55,
+            "volume": 15320,
+            "oi": 41200,
+            "delta": 0.31,
+        },
+    ]
+
+    texts = build_alert_texts(sample_alert, sample_options)
+    status_code, response = send_telegram_message(texts.get("standard", ""))
+
+    logger.info(
+        "debug sample alert sent",
+        status_code=status_code,
+        response=response,
+    )
+
+    return {"ok": True, "sent": True}
