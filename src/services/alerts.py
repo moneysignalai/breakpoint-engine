@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 import httpx
 from loguru import logger
+from zoneinfo import ZoneInfo
 
 from src.config import get_settings
 
@@ -202,6 +203,25 @@ def _format_vwap(value: Any) -> str:
     return "Unknown"
 
 
+def _format_timestamp_et(alert: Dict[str, Any]) -> str:
+    tz = ZoneInfo(settings.TIMEZONE)
+    alert_ts = alert.get("ts") or alert.get("triggered_at") or alert.get("created_at")
+    try:
+        if isinstance(alert_ts, datetime):
+            dt = alert_ts
+        elif isinstance(alert_ts, str):
+            dt = datetime.fromisoformat(alert_ts)
+        else:
+            dt = datetime.now(timezone.utc)
+    except Exception:
+        dt = datetime.now(timezone.utc)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt_et = dt.astimezone(tz)
+    return dt_et.strftime("%Y-%m-%d %I:%M %p ET")
+
+
 def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | None = None) -> dict[str, str]:
     symbol = alert.get("symbol", "?")
     direction = alert.get("direction", "?")
@@ -231,56 +251,67 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     vwap_text = _format_vwap(vwap_ok)
     bias_text = _format_market_bias(market_bias)
     expected_window_text = _format_expected_window(expected_window)
+    ts_et = _format_timestamp_et(alert)
+    box_timeframe = "5m"
+    vol_text = f"{float(break_vol_mult):.2f}" if isinstance(break_vol_mult, (int, float)) else "N/A"
+    trend_description = _format_market_bias(direction)
 
     standard_lines = [
-        f"🔥 BREAKPOINT TRIGGER — {symbol}",
+        "────────────────────────────────",
+        f"⚡ BREAKPOINT ALERT — {symbol}",
+        f"🕒 {ts_et} · ⏱ RTH · 📊 Market Context: {bias_text}",
         "",
-        "SETUP",
-        f"• Tight compression box resolved with expansion",
-        f"• Range: {_format_percent(range_pct)}% (last {settings.BOX_BARS} × 5m bars)",
-        f"• Breakout close: +{_format_percent(extension_pct)}% beyond box",
-        f"• Volume: {break_vol_mult:.2f}× box average" if isinstance(break_vol_mult, (int, float)) else "• Volume: N/A",
-        f"• VWAP: {vwap_text}",
-        f"• Market bias: {bias_text}",
+        "🧠 SETUP",
+        (
+            f"• Box Range: {_format_percent(range_pct)}% ({settings.BOX_BARS}×{box_timeframe}) "
+            f"· Break: {_format_percent(extension_pct)}% · Vol: {vol_text}×"
+        ),
+        f"• VWAP: {vwap_text} · Trend: {trend_description}",
         "",
-        "STOCK PLAN",
+        "📈 STOCK PLAN",
         f"• Entry: {_format_price(entry)} ({entry_phrase})",
         f"• Invalidation: {_format_price(stop)} (back inside box)",
-        f"• Target 1: {_format_price(t1)}",
-        f"• Target 2: {_format_price(t2)}",
-        f"• Expected window: {expected_window_text}",
+        f"• Targets: {_format_price(t1)} → {_format_price(t2)}",
+        f"• Window: {expected_window_text}",
         "",
+        "🎯 OPTIONS (Weekly / Liquid)",
     ]
 
     if options:
-        standard_lines.append("OPTIONS (LIQUID / WEEKLY)")
         tier_map: dict[str, dict[str, Any]] = {}
         for opt in options:
             opt_with_alert = {**opt, "alert": alert}
             tier = str(opt.get("tier", "")).lower()
             tier_map[tier] = opt_with_alert
 
-        tiers = ["Conservative", "Standard", "Aggressive"]
-        pad = max(len(t) for t in tiers)
-        for tier in tiers:
+        tiers = [
+            ("Conservative", "🟢"),
+            ("Standard", "🟡"),
+            ("Aggressive", "🔴"),
+        ]
+        label_width = max(len(name) for name, _ in tiers)
+        for tier, emoji in tiers:
             opt = tier_map.get(tier.lower(), {})
             opt.setdefault("tier", tier)
             opt.setdefault("alert", alert)
             details = _format_option_line(opt, alert)
-            standard_lines.append(f"• {tier}: {' ' * (pad - len(tier))}{details}")
+            label = f"{emoji} {tier}:".ljust(label_width + 4)
+            standard_lines.append(f"• {label} {details}")
     else:
-        standard_lines.append("OPTIONS: stock-only (no liquid contracts / IV too high / unavailable)")
+        standard_lines.append(
+            "• stock-only (no liquid contracts / IV too high / unavailable)"
+        )
 
     standard_lines.extend(
         [
             "",
-            "RISK NOTES",
-            "• Take 40–60% at T1",
-            "• Runner to T2",
-            "• Time stop: exit if no continuation in 30–60 min",
-            "• Exit on invalidation (back inside box)",
+            "🛡️ RISK NOTES",
+            "• Take 40–60% at T1 · Runner to T2",
+            "• Time stop: 30–60 min if no continuation",
+            "• Hard exit if invalidation triggers",
             "",
-            f"Confidence: {float(confidence):.1f} / 10" if confidence is not None else "Confidence: N/A",
+            f"⭐ Confidence: {float(confidence):.1f} / 10" if confidence is not None else "⭐ Confidence: N/A",
+            "────────────────────────────────",
         ]
     )
 
