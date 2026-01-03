@@ -61,29 +61,30 @@ Traders may take the stock only, use the stock signal to select their own contra
 ## Alert Format (STANDARD TEMPLATE)
 A typical Telegram alert follows this structure:
 
-⚡ BREAKPOINT ALERT — TICKER  
-📊 Direction: Bullish  
-🧠 Setup: Breakpoint Momentum  
-⏱ Timeframe: Intraday / Short-term  
+⚡ BREAKPOINT ALERT — NVDA  
+🕒 10:42 AM ET · ⏱ RTH · 📊 Market Context: Bullish  
 
-📈 STOCK CONTEXT  
-• Price: $XXX.XX  
-• VWAP: Above  
-• Trend: Higher Lows  
-• Volume: Elevated vs baseline  
+🧠 SETUP  
+• Box Range: 0.86% (12×5m) · Break: +0.35% · Vol: 2.35×  
+• VWAP: Confirmed · Trend: Higher lows  
 
-🎯 OPTIONS CONTEXT (If Applicable)  
-• Contract: 100C  
-• Expiration: 2024-12-20  
-• Liquidity: Sufficient  
-• Premium Range: $1.10 – $1.30  
+📈 STOCK PLAN  
+• Entry: 550.25 (hold above)  
+• Invalidation: 542.80 (back inside box)  
+• Targets: 565.00 → 578.50  
+• Window: Same day → 1–3 days  
 
-🧭 RISK NOTES  
-• Not a market order  
-• Wait for confirmation  
-• Manage position size  
+🎯 OPTIONS (Weekly / Liquid)  
+• 🟢 Conservative: 555C · 6 DTE · Δ 0.35 · Mid $3.23 · Sprd 7.75%  
+• 🟡 Standard:     560C · 6 DTE · Δ 0.28 · Mid $2.23 · Sprd 11.24%  
+• 🔴 Aggressive:   570C · 6 DTE · Δ 0.18 · Mid $1.15 · Sprd 17.39%  
 
-⚠️ Alerts are informational, not financial advice.
+🛡️ RISK NOTES  
+• Take 40–60% at T1 · Runner to T2  
+• Time stop: 30–60 min if no continuation  
+• Hard exit if invalidation triggers  
+
+⭐ Confidence: 7.2 / 10  
 
 --------------------------------------------------
 ## Risk & Compliance Disclosure
