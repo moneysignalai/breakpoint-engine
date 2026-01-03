@@ -15,6 +15,10 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 
 
 def init_db() -> None:
+    # Import models so that SQLAlchemy registers all mappers before creating
+    # tables. This ensures relationship dependencies resolve correctly.
+    from src.models import alert, grade, option_candidate, scan_run  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
 
 
