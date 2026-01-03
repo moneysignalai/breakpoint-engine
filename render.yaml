@@ -1,6 +1,6 @@
 databases:
   - name: breakpoint-db
-    plan: starter
+    plan: basic
 
 services:
   - type: web
