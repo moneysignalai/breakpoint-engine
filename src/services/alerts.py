@@ -141,7 +141,7 @@ def _format_dte(expiry: Any, alert: Dict[str, Any]) -> str:
         return "DTE N/A"
 
 
-def _format_option_line(option: dict[str, Any], alert: Dict[str, Any]) -> str:
+def _format_option_line(option: dict[str, Any], alert: Dict[str, Any]) -> tuple[str, str]:
     strike_val = option.get("strike")
     strike_display: str | None = None
     cp_display = _normalize_call_put(option.get("call_put"))
@@ -173,7 +173,10 @@ def _format_option_line(option: dict[str, Any], alert: Dict[str, Any]) -> str:
     spread_display = f"{spread_display_raw}%" if spread_display_raw != "N/A" else "N/A"
     dte_display = _format_dte(option.get("expiry"), alert)
 
-    return f"{strike_display}{cp_display} ({dte_display} | Δ {delta_display} | Mid {mid_display} | Sprd {spread_display})"
+    return (
+        f"{strike_display}{cp_display}",
+        f"({dte_display} | Δ {delta_display} | Mid {mid_display} | Sprd {spread_display})",
+    )
 
 
 def _format_market_bias(value: Any) -> str:
@@ -205,7 +208,7 @@ def _format_vwap(value: Any) -> str:
 
 def _format_timestamp_et(alert: Dict[str, Any]) -> str:
     dt_et = _get_alert_datetime_et(alert)
-    return dt_et.strftime("%Y-%m-%d %I:%M %p ET")
+    return dt_et.strftime("%m-%d-%Y %I:%M %p ET")
 
 
 def _get_alert_datetime_et(alert: Dict[str, Any]) -> datetime:
@@ -227,7 +230,7 @@ def _get_alert_datetime_et(alert: Dict[str, Any]) -> datetime:
     return dt_et
 
 
-def _format_session_label(alert: Dict[str, Any]) -> str:
+def _format_session_label(alert: Dict[str, Any]) -> tuple[str, str]:
     dt_et = _get_alert_datetime_et(alert)
     t = dt_et.time()
     rth_start = time(9, 30)
@@ -237,12 +240,12 @@ def _format_session_label(alert: Dict[str, Any]) -> str:
     pmkt_start = time(4, 0)
 
     if rth_start <= t <= rth_end:
-        return "📍 RTH"
+        return "⏱", "RTH"
     if ah_start < t <= ah_end or t > ah_end:
-        return "🌙 AH"
+        return "🌙", "AH"
     if pmkt_start <= t < rth_start:
-        return "🌅 PMKT"
-    return "🌅 PMKT"
+        return "🌅", "PM"
+    return "🌅", "PM"
 
 
 def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | None = None) -> dict[str, str]:
@@ -275,7 +278,7 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     bias_text = _format_market_bias(market_bias)
     expected_window_text = _format_expected_window(expected_window)
     ts_et = _format_timestamp_et(alert)
-    session_label = _format_session_label(alert)
+    session_emoji, session_label = _format_session_label(alert)
     box_timeframe = "5m"
     vol_text = f"{float(break_vol_mult):.2f}" if isinstance(break_vol_mult, (int, float)) else "N/A"
     direction_norm = str(direction).upper() if direction is not None else None
@@ -287,9 +290,10 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
         trend_description = "Range"
 
     standard_lines = [
-        "────────────────────────────────",
-        f"⚡ BREAKPOINT ALERT — {symbol}",
-        f"🕒 {ts_et} · ⏱ {session_label} · 🧭 Bias: {bias_text}",
+        "─────────────────",
+        f"⚡ BREAKPOINT ALERT - {symbol}",
+        f"🕒 {ts_et}  ",
+        f"⏰ {session_emoji} {session_label} · 🚦 Bias: {bias_text}",
         "",
         "🧠 SETUP",
         (
@@ -319,14 +323,15 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
             ("Standard", "🟡"),
             ("Aggressive", "🔴"),
         ]
-        label_width = max(len(name) for name, _ in tiers)
+        label_width = max(len(f"{emoji} {name}:") for name, emoji in tiers)
         for tier, emoji in tiers:
             opt = tier_map.get(tier.lower(), {})
             opt.setdefault("tier", tier)
             opt.setdefault("alert", alert)
-            details = _format_option_line(opt, alert)
-            label = f"{emoji} {tier}:".ljust(label_width + 4)
-            standard_lines.append(f"• {label} {details}")
+            strike_cp, details = _format_option_line(opt, alert)
+            label = f"{emoji} {tier}:".ljust(label_width + 2)
+            standard_lines.append(f"• {label} {strike_cp}")
+            standard_lines.append(details)
     else:
         standard_lines.append(
             "• stock-only (no liquid contracts / IV too high / unavailable)"
@@ -341,7 +346,7 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
             "• Hard exit if invalidation triggers",
             "",
             f"⭐ Confidence: {float(confidence):.1f} / 10" if confidence is not None else "⭐ Confidence: N/A",
-            "────────────────────────────────",
+            "─────────────────",
         ]
     )
 
