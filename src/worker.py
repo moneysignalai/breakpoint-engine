@@ -65,7 +65,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
     def log_scan_end() -> None:
         duration_ms = int((time.monotonic() - start) * 1000)
-        if universe_count > 0 and scanned_count == 0:
+        if (
+            universe_count > 0
+            and scanned_count == 0
+            and scan_reason in {"ok", "forced_outside_window"}
+        ):
             logger.warning(
                 f"scan anomaly | universe_count={universe_count} scanned=0 reason=skipped_loop_or_gate"
             )
