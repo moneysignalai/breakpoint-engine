@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     SCAN_INTERVAL_SECONDS: int = 60
     UNIVERSE: str = "SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO"
     RTH_ONLY: bool = True
+    SCAN_OUTSIDE_WINDOW: bool = False
     MIN_CONFIDENCE_TO_ALERT: float = 7.5
     TIMEZONE: str = "America/New_York"
 
