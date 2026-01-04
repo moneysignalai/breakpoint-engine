@@ -1,242 +1,196 @@
-# Breakpoint Engine ⚡📈  
-**A disciplined intelligence engine for stock and options alerts — built to reduce noise, enforce structure, and deliver actionable context.**
+# Breakpoint Engine — deterministic market alerts with built-in guardrails
 
-Breakpoint Engine is not a “signals group.”  
-It is a deterministic market-intelligence system designed to identify *high-quality structural setups*, score them, and emit alerts only when strict criteria are met.
-
----
+Breakpoint Engine is a production-grade scanner and alert builder for high-quality stock and options setups. It keeps alerts scarce, structured, and explainable for operators while communicating value to capital allocators who care about discipline.
 
 ## Executive Overview
+- Focused on one flagship structural breakout setup; no strategy sprawl.
+- Deterministic gating and scoring to avoid alert spam.
+- Options tiers only when liquidity, spread, and IV thresholds are met.
+- Production delivery via FastAPI + PostgreSQL + Telegram with audit trails.
+- Built for operators who need clarity and for investors who need rigor.
 
-Most market alerts fail because they prioritize volume over quality.
-
-Breakpoint Engine takes the opposite approach:
-- one flagship setup
-- hard gating and scoring
-- structured, explainable alerts
-- production-grade delivery and auditability
-
-The result is fewer alerts — but higher conviction, clearer risk framing, and repeatable logic.
-
-This repository contains the **core engine**, alert formatting, and deployment infrastructure.
-
----
-
-## What Breakpoint Engine Does
-
-- Scans defined stock universes for a single flagship structural setup  
-- Applies scoring, liquidity, volatility, and regime filters  
-- Emits alerts only when confidence thresholds are met  
-- Packages alerts with:
-  - clear setup context
-  - stock plan
-  - optional options tiers (when liquidity allows)
-  - explicit risk notes
-- Persists alerts for review and future analysis  
-
----
+## What It Does
+- Scans a defined equity universe on a schedule and filters by liquidity, price, and volatility constraints.
+- Evaluates a boxed-range breakout pattern with volume and ATR compression checks.
+- Scores every candidate; suppresses anything below the minimum confidence threshold.
+- Produces structured alerts with setup rationale, trade plan, and optional options ladders.
+- Persists alerts and option candidates for review, analytics, and future strategy work.
 
 ## Why It’s Different
-
-**Signal over noise**
-- No alert spam
-- No conflicting strategies
-- No discretionary “vibes”
-
-**Explainability**
-- Every alert includes *why it fired* and *where it fails*
-- Confidence is scored, not implied
-
-**Discipline**
-- One core setup, refined — not dozens of half-baked strategies
-- Alerts are gated, not streamed
-
-**Production-grade**
-- Worker-based scanning
-- Database-backed persistence
-- Deterministic formatting
-- Deployable on Render with Postgres
-
----
+- **Deterministic core**: one setup with explicit thresholds—no discretionary “vibes.”
+- **Scoring + gating**: alerts are suppressed unless minimum confidence is met.
+- **Explainable output**: every alert includes why it fired, risk notes, and confidence.
+- **Anti-spam design**: liquidity, spread, IV, and session windows prevent junk signals.
+- **Production-ready**: worker loop, API layer, migrations, and Render deployment baked in.
 
 ## Alert Output (Exact Format)
+The examples below mirror the generator in `src/services/alerts.py`. Section headers, emojis, ordering, and wording are unchanged.
 
-### STANDARD ALERT
-
+### STANDARD
+```
 ─────────────────
 ⚡ BREAKPOINT ALERT - NVDA
-🕒 05-06-2024 10:42 AM ET
+🕒 05-06-2024 10:42 AM ET  
 ⏰ ⏱ RTH · 🚦 Bias: Bullish
 
 🧠 SETUP
-• Structure reclaim with continuation potential
-• Momentum aligned with higher timeframe trend
+• Box Range: 0.80% (12×5m) · Break: 0.45% · Vol: 2.40×
+• VWAP: Confirmed · Trend: Uptrend
 
 📈 STOCK PLAN
-• Trigger: 915.20
-• Invalidation: 902.80
-• Context: Above VWAP, volume expansion
+• Entry: 915.20 (hold above)
+• Invalidation: 902.80 (back inside box)
+• Targets: 930.00 → 945.00
+• Window: 1–3 days
 
 🎯 OPTIONS (Weekly / Liquid)
-• 🟢 Conservative:
-910C (5 DTE | Δ 0.42 | Mid $3.10 | Sprd $0.05)
-• 🟡 Standard:
-920C (5 DTE | Δ 0.31 | Mid $1.85 | Sprd $0.07)
-• 🔴 Aggressive:
-930C (5 DTE | Δ 0.22 | Mid $1.05 | Sprd $0.10)
+• 🟢 Conservative:   910C
+(5 DTE | Δ 0.42 | Mid 3.10 | Sprd 1.50%)
+• 🟡 Standard:       920C
+(5 DTE | Δ 0.31 | Mid 1.85 | Sprd 1.75%)
+• 🔴 Aggressive:     930C
+(5 DTE | Δ 0.22 | Mid 1.05 | Sprd 2.00%)
 
 🛡️ RISK NOTES
-• Avoid chasing extended candles
-• Invalidate on loss of structure
+• Take 40–60% at T1 · Runner to T2
+• Time stop: 30–60 min if no continuation
+• Hard exit if invalidation triggers
 
 ⭐ Confidence: 7.2 / 10
 ─────────────────
+```
 
-sql
-Copy code
-
-### STOCK-ONLY ALERT (WHEN OPTIONS ARE NOT QUALIFIED)
-
+### STOCK-ONLY OPTIONS BEHAVIOR
+(Options header stays; the options line indicates no qualified contracts.)
+```
 🎯 OPTIONS (Weekly / Liquid)
 • stock-only (no liquid contracts / IV too high / unavailable)
+```
 
-shell
-Copy code
+### SHORT
+```
+SPY LONG entry 525.25 stop 519.50 T1 533.00 T2 540.00 (conf 7.8)
+```
 
-### SHORT FORMAT
-
-⚡ BP ALERT — SPY | Bullish | Trigger 505.40 | Invalid 501.90 | Conf 6.8
-
-less
-Copy code
-
----
+### DEEP
+```
+SPY LONG compression breakout
+Box: 518.00-522.00 (range 0.76%)
+Trigger close beyond box: 0.35% beyond edge
+Breakout volume: 2.40x box avg
+ATR compression ratio: 1.20
+VWAP confirmation: True
+Market bias: Bullish
+Plan: entry 525.25 stop 519.50 T1 533.00 T2 540.00 (conf 7.8)
+Conservative: SPY240621C520 mid 6.95 sprd 2.9% vol 1123 oi 20450 delta 0.45
+Standard: SPY240621C525 mid 4.45 sprd 4.5% vol 8420 oi 35670 delta 0.38
+Aggressive: SPY240621C530 mid 2.45 sprd 8.2% vol 15320 oi 41200 delta 0.31
+Exit: Take 40-60% at T1, runner to T2, time stop 30-60m if no continuation, exit on invalidation
+```
 
 ## System Architecture
-
 ```mermaid
 flowchart LR
-  A[Market Data] --> B[Scanner / Rules Engine]
-  B --> C[Scoring & Filters]
-  C -->|Qualified| D[Alert Builder]
-  D --> E[(Postgres)]
-  D --> F[Telegram Delivery]
-  E --> G[Review / Analytics]
-Quality Controls (Why Alerts Aren’t Spam)
-Minimum confidence threshold required
+  A[Market Data Provider] --> B[Worker Scanner]
+  B --> C[Flagship Strategy + Gating]
+  C -->|Meets thresholds| D[Options Optimizer]
+  D --> E[Alert Builder]
+  E --> F[(PostgreSQL)]
+  E --> G[Telegram Delivery]
+  F --> H[FastAPI for review / ops]
+  H --> I[Operators & Monitoring]
+```
 
-Liquidity and spread checks for options
+## Quality Controls (Why Alerts Aren’t Spam)
+- Minimum confidence enforced (`MIN_CONFIDENCE_TO_ALERT`).
+- Liquidity, spread, and IV caps before options are allowed.
+- Session-aware gating (`RTH_ONLY`, `ALLOWED_WINDOWS`) plus optional outside-window override.
+- Box range, ATR compression, and breakout volume thresholds prevent marginal setups.
+- Options optimizer downgrades confidence when only stock is viable.
+- Alerts persist with metadata for auditability.
 
-Volatility gating (IV and regime awareness)
-
-Session awareness (RTH / AH)
-
-Alert throttling to avoid clustering noise
-
-Stock-first logic (options only when justified)
-
-If conditions are not clean, no alert is sent.
-
-Quickstart (Local)
-Environment
-Create a .env file:
-
-bash
-Copy code
+## Quickstart (Local)
+### Environment
+Create a `.env` with at least:
+```
+MASSIVE_API_KEY=your_api_key
 DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db
-TELEGRAM_BOT_TOKEN=your_token
-TELEGRAM_CHAT_ID=your_chat_id
+TELEGRAM_ENABLED=false
+TELEGRAM_BOT_TOKEN=optional_bot_token
+TELEGRAM_CHAT_ID=optional_chat_id
+UNIVERSE=SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO
+TIMEZONE=America/New_York
+RTH_ONLY=true
+SCAN_INTERVAL_SECONDS=60
+MIN_CONFIDENCE_TO_ALERT=7.5
+```
 
-SCAN_UNIVERSE=SPY,NVDA,AVGO,TSLA
-SCAN_WINDOW=RTH
-Install & Run
-bash
-Copy code
+### Install, migrate, and run
+```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
+export PYTHONPATH=.
 alembic upgrade head
+# Start the API (health, config, manual scan endpoints)
+uvicorn src.main:app --host 0.0.0.0 --port 8000
+# Start the worker scanner (in another shell)
 python -m src.worker
-Deployment (Render)
-Uses render.yaml
+```
 
-Postgres required
+## Deployment (Render)
+- `render.yaml` defines a **web** service (`uvicorn src.main:app`) and a **worker** service (`python -m src.worker`).
+- Both services run migrations on boot: `alembic upgrade head`.
+- PostgreSQL is provisioned as `breakpoint-db`; `DATABASE_URL` is injected from the Render database connection string.
+- Env vars such as `MASSIVE_API_KEY`, `TELEGRAM_*`, `TIMEZONE`, `RTH_ONLY`, `SCAN_INTERVAL_SECONDS`, `MIN_CONFIDENCE_TO_ALERT`, and `UNIVERSE` map directly to `src/config.py`.
 
-Migrations run on boot
+## Configuration
+All settings are defined in `src/config.py` (Pydantic). Key variables:
+- `MASSIVE_API_KEY` – credentials for the market data provider (required).
+- `DATABASE_URL` – SQLAlchemy connection string (required).
+- `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` – delivery controls.
+- `SCAN_INTERVAL_SECONDS` – worker cadence.
+- `UNIVERSE` – comma-separated symbols scanned each cycle.
+- `RTH_ONLY`, `SCAN_OUTSIDE_WINDOW`, `ALLOWED_WINDOWS`, `TIMEZONE` – session controls.
+- `MIN_CONFIDENCE_TO_ALERT` – gating threshold for sending alerts.
+- `MIN_AVG_DAILY_VOLUME`, `MIN_PRICE`, `MAX_PRICE` – base liquidity and price filters.
+- `BOX_BARS`, `BOX_MAX_RANGE_PCT`, `ATR_COMP_FACTOR`, `VOL_CONTRACTION_FACTOR`, `BREAK_BUFFER_PCT`, `MAX_EXTENSION_PCT`, `BREAK_VOL_MULT`, `VWAP_CONFIRM` – flagship setup parameters.
+- `SPREAD_PCT_MAX`, `MIN_OPT_VOLUME`, `MIN_OPT_OI`, `MIN_OPT_MID`, `IV_PCTL_MAX_FOR_AGG`, `IV_PCTL_MAX_FOR_ANY` – options eligibility thresholds.
+- `ENTRY_BUFFER_PCT`, `STOP_BUFFER_PCT` – execution buffers for entries and stops.
 
-Worker runs continuously
-
-Render handles restarts and environment management.
-
-Configuration
-Key settings live in src/config.py and environment variables:
-
-SCAN_UNIVERSE – symbols to scan
-
-SCAN_WINDOW – RTH / AH
-
-Confidence thresholds
-
-Liquidity and spread limits
-
-Alert delivery toggles
-
-Configuration is explicit and deterministic — no hidden behavior.
-
-Repo Layout
-txt
-Copy code
-src/
-  worker.py          # scanning loop
-  services/
-    alerts.py        # alert formatting logic
-  models/            # database models
-  config.py          # settings & env parsing
-
-alembic/             # migrations
-render.yaml          # deployment config
-requirements.txt
+## Repo Layout
+```
 README.md
-Roadmap
-Post-alert outcome tracking (MFE / MAE / time-to-peak)
+render.yaml
+requirements.txt
+runtime.txt
+alembic.ini
+alembic/
+  versions/        # database migrations
+src/
+  main.py          # FastAPI entrypoint
+  worker.py        # scheduled scanner + alert publisher
+  config.py        # environment-backed settings
+  services/
+    alerts.py      # alert formatting & Telegram sender
+    db.py          # session management + init
+    market_time.py # session gating helpers
+  models/          # SQLAlchemy models (Alert, OptionCandidate, etc.)
+  strategies/      # flagship strategy + option optimizer
+  utils/           # logging and helpers
+tests/
+```
 
-Alert analytics dashboard
+## Roadmap
+- Post-alert analytics (MFE/MAE, time-to-peak, stop-out timing).
+- Operator dashboard for latest alerts and audit trails.
+- Additional delivery channels (webhooks, Slack) with the same format discipline.
+- Configurable universes per deployment without changing code.
 
-Additional delivery channels (webhooks / Slack)
+## Compliance / Reality Check
+- Provides market intelligence and structured alerts, not financial advice.
+- No profit guarantees or certainty of outcomes.
+- Users remain responsible for execution, risk limits, and compliance obligations.
 
-Strategy extensions without diluting signal quality
-
-Compliance / Reality Check
-Breakpoint Engine provides market intelligence, not financial advice.
-
-No profit guarantees
-
-No certainty claims
-
-Alerts require user discretion and risk management
-
-Use responsibly.
-
-Summary
-Breakpoint Engine is designed for:
-
-traders who value structure over noise
-
-builders who care about deterministic systems
-
-investors who understand discipline scales better than hype
-
-This repo contains the engine — not a marketing wrapper.
-
-yaml
-Copy code
-
----
-
-If you want next:
-- a **landing-page version** of this README  
-- a **VC / investor one-pager**  
-- or a **paid-product version vs open-repo version**
-
-just say the word.
+## About / Contact
+Built and maintained by the Breakpoint team. For collaboration or deployment inquiries, open an issue in this repository.
