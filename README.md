@@ -147,6 +147,7 @@ python -m src.worker
 ## Configuration
 All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `MASSIVE_API_KEY` – credentials for the market data provider (required).
+- `MASSIVE_BARS_PATH_TEMPLATE` – override for the Massive bars endpoint path template (default `/markets/{symbol}/bars`).
 - `DATABASE_URL` – SQLAlchemy connection string (required).
 - `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` – delivery controls.
 - `SCAN_INTERVAL_SECONDS` – worker cadence.
@@ -157,6 +158,13 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `BOX_BARS`, `BOX_MAX_RANGE_PCT`, `ATR_COMP_FACTOR`, `VOL_CONTRACTION_FACTOR`, `BREAK_BUFFER_PCT`, `MAX_EXTENSION_PCT`, `BREAK_VOL_MULT`, `VWAP_CONFIRM` – flagship setup parameters.
 - `SPREAD_PCT_MAX`, `MIN_OPT_VOLUME`, `MIN_OPT_OI`, `MIN_OPT_MID`, `IV_PCTL_MAX_FOR_AGG`, `IV_PCTL_MAX_FOR_ANY` – options eligibility thresholds.
 - `ENTRY_BUFFER_PCT`, `STOP_BUFFER_PCT` – execution buffers for entries and stops.
+
+## Operational Logging
+- **scan start** – includes the universe size and session window label (RTH/PM/AH) so you know the worker cadence and gating state.
+- **scan end** – always reports duration, symbols scanned, alerts triggered, and errors plus a reason (e.g., `outside_window`, `api_error`). When `scanned=0`, a warning is emitted to highlight anomalies.
+- **scan symbol error** – single-line summaries per symbol with stage (`bars`, `options_expirations`, `alert_send`, etc.) and the status/exception reason to quickly isolate failing calls.
+- **alert send result** – reports Telegram delivery outcome with status and reason while omitting secrets.
+- A dedicated warning surfaces if the Massive bars endpoint returns multiple 404s in a scan to hint at route/template misconfiguration.
 
 ## Repo Layout
 ```
