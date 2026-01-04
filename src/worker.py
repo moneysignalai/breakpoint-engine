@@ -35,254 +35,286 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     optimizer = OptionOptimizer()
 
     started_at = datetime.utcnow()
-    scan_start = time.perf_counter()
     scan_notes = []
-    errors = 0
     alerts_triggered: List[Dict[str, Any]] = []
     scanned_count = 0
+    triggered_count = 0
+    error_count = 0
+    scan_start_ts = time.perf_counter()
 
     logger.info(
         "scan start",
-        universe_size=len(settings.universe_list()),
+        event="scan_start",
+        universe_count=len(settings.universe_list()),
         rth_only=settings.RTH_ONLY,
         is_rth=is_rth(),
     )
+    result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
 
-    with session_scope() as session:
-        scan_run = ScanRun(started_at=started_at, finished_at=None, universe=settings.UNIVERSE, symbols_scanned=[])
-        session.add(scan_run)
-        session.flush()
+    try:
+        with session_scope() as session:
+            scan_run = ScanRun(started_at=started_at, finished_at=None, universe=settings.UNIVERSE, symbols_scanned=[])
+            session.add(scan_run)
+            session.flush()
 
-        if settings.RTH_ONLY and not is_rth():
-            scan_run.finished_at = datetime.utcnow()
-            scan_run.notes = "Outside RTH"
-            return {"alerts": [], "notes": "Outside RTH"}
+            if settings.RTH_ONLY and not is_rth():
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.notes = "Outside RTH"
+                result = {"alerts": [], "notes": "Outside RTH"}
+                return result
 
-        market_symbol = "QQQ"
-        try:
-            market_bars_start = time.perf_counter()
-            market_bars = client.get_bars(market_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
-            logger.info(
-                "market bars fetched",
-                symbol=market_symbol,
-                duration_ms=int((time.perf_counter() - market_bars_start) * 1000),
-                bars=len(market_bars),
-            )
-        except Exception:
-            logger.exception("market bars fetch failed", symbol=market_symbol)
-            raise
-
-        for symbol in settings.universe_list():
-            scanned_count += 1
+            market_symbol = "QQQ"
             try:
-                bars_start = time.perf_counter()
-                try:
-                    bars = client.get_bars(symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
-                except Exception:
-                    logger.exception("bars fetch failed", symbol=symbol)
-                    raise
+                market_bars_start = time.perf_counter()
+                market_bars = client.get_bars(market_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
                 logger.info(
-                    "bars fetched",
-                    symbol=symbol,
-                    duration_ms=int((time.perf_counter() - bars_start) * 1000),
-                    bars=len(bars),
+                    "market bars fetched",
+                    symbol=market_symbol,
+                    duration_ms=int((time.perf_counter() - market_bars_start) * 1000),
+                    bars=len(market_bars),
                 )
+            except Exception:
+                error_count += 1
+                logger.exception("market bars fetch failed", symbol=market_symbol)
+                raise
 
-                daily_start = time.perf_counter()
+            for symbol in settings.universe_list():
+                scanned_count += 1
+                symbol_error_recorded = False
                 try:
-                    daily = client.get_daily_snapshot(symbol)
-                except Exception:
-                    logger.exception("daily snapshot failed", symbol=symbol)
-                    raise
-                logger.debug(
-                    "daily snapshot fetched",
-                    symbol=symbol,
-                    duration_ms=int((time.perf_counter() - daily_start) * 1000),
-                )
-
-                idea = strategy.evaluate(symbol, bars, daily, market_bars)
-                if not idea:
-                    logger.info("strategy skipped", symbol=symbol)
-                    continue
-
-                logger.info(
-                    "strategy passed",
-                    symbol=symbol,
-                    direction=idea.direction,
-                    confidence=idea.confidence,
-                )
-
-                expirations_start = time.perf_counter()
-                try:
-                    expirations = client.get_option_expirations(symbol)
-                except Exception:
-                    logger.exception("expirations fetch failed", symbol=symbol)
-                    raise
-                logger.info(
-                    "expirations fetched",
-                    symbol=symbol,
-                    duration_ms=int((time.perf_counter() - expirations_start) * 1000),
-                    expirations=len(expirations),
-                )
-                iv_pct = daily.get('iv_percentile') if isinstance(daily, dict) else None
-
-                def load_chain(exp: str):
-                    chain_start = time.perf_counter()
+                    bars_start = time.perf_counter()
                     try:
-                        chain = client.get_option_chain(symbol, exp)
+                        bars = client.get_bars(symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
                     except Exception:
-                        logger.exception("option chain failed", symbol=symbol, expiration=exp)
+                        error_count += 1
+                        symbol_error_recorded = True
+                        logger.exception("bars fetch failed", symbol=symbol)
+                        raise
+                    logger.info(
+                        "bars fetched",
+                        symbol=symbol,
+                        duration_ms=int((time.perf_counter() - bars_start) * 1000),
+                        bars=len(bars),
+                    )
+
+                    daily_start = time.perf_counter()
+                    try:
+                        daily = client.get_daily_snapshot(symbol)
+                    except Exception:
+                        error_count += 1
+                        symbol_error_recorded = True
+                        logger.exception("daily snapshot failed", symbol=symbol)
                         raise
                     logger.debug(
-                        "option chain fetched",
+                        "daily snapshot fetched",
                         symbol=symbol,
-                        expiration=exp,
-                        duration_ms=int((time.perf_counter() - chain_start) * 1000),
-                        contracts=len(chain),
+                        duration_ms=int((time.perf_counter() - daily_start) * 1000),
                     )
-                    return chain
 
-                opt_result = optimizer.run(symbol, idea.direction, idea.expected_window, bars[-1]['ts'] if isinstance(bars[-1]['ts'], datetime) else datetime.fromisoformat(bars[-1]['ts']), expirations, load_chain, iv_percentile=iv_pct)
+                    idea = strategy.evaluate(symbol, bars, daily, market_bars)
+                    if not idea:
+                        logger.info("strategy skipped", symbol=symbol)
+                        continue
 
-                confidence = idea.confidence
-                option_picks: List[OptionPick] = []
-                if opt_result.stock_only:
-                    confidence = max(0.0, confidence - 1.0)
-                    idea.debug['debug_reasons'].append(opt_result.reason or "stock-only")
-                else:
-                    option_picks = opt_result.candidates
-
-                logger.info(
-                    "optimizer result",
-                    symbol=symbol,
-                    stock_only=opt_result.stock_only,
-                    candidate_count=len(option_picks),
-                )
-
-                if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
                     logger.info(
-                        "alert threshold not met",
+                        "strategy passed",
                         symbol=symbol,
-                        confidence=confidence,
-                        min_confidence=settings.MIN_CONFIDENCE_TO_ALERT,
+                        direction=idea.direction,
+                        confidence=idea.confidence,
                     )
+
+                    expirations_start = time.perf_counter()
+                    try:
+                        expirations = client.get_option_expirations(symbol)
+                    except Exception:
+                        error_count += 1
+                        symbol_error_recorded = True
+                        logger.exception("expirations fetch failed", symbol=symbol)
+                        raise
+                    logger.info(
+                        "expirations fetched",
+                        symbol=symbol,
+                        duration_ms=int((time.perf_counter() - expirations_start) * 1000),
+                        expirations=len(expirations),
+                    )
+                    iv_pct = daily.get('iv_percentile') if isinstance(daily, dict) else None
+
+                    def load_chain(exp: str):
+                        nonlocal symbol_error_recorded
+                        chain_start = time.perf_counter()
+                        try:
+                            chain = client.get_option_chain(symbol, exp)
+                        except Exception:
+                            error_count += 1
+                            symbol_error_recorded = True
+                            logger.exception("option chain failed", symbol=symbol, expiration=exp)
+                            raise
+                        logger.debug(
+                            "option chain fetched",
+                            symbol=symbol,
+                            expiration=exp,
+                            duration_ms=int((time.perf_counter() - chain_start) * 1000),
+                            contracts=len(chain),
+                        )
+                        return chain
+
+                    opt_result = optimizer.run(symbol, idea.direction, idea.expected_window, bars[-1]['ts'] if isinstance(bars[-1]['ts'], datetime) else datetime.fromisoformat(bars[-1]['ts']), expirations, load_chain, iv_percentile=iv_pct)
+
+                    confidence = idea.confidence
+                    option_picks: List[OptionPick] = []
+                    if opt_result.stock_only:
+                        confidence = max(0.0, confidence - 1.0)
+                        idea.debug['debug_reasons'].append(opt_result.reason or "stock-only")
+                    else:
+                        option_picks = opt_result.candidates
+
+                    logger.info(
+                        "optimizer result",
+                        symbol=symbol,
+                        stock_only=opt_result.stock_only,
+                        candidate_count=len(option_picks),
+                    )
+
+                    if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
+                        logger.info(
+                            "alert threshold not met",
+                            symbol=symbol,
+                            confidence=confidence,
+                            min_confidence=settings.MIN_CONFIDENCE_TO_ALERT,
+                        )
+                        continue
+
+                    alert_dict = {
+                        "symbol": symbol,
+                        "direction": idea.direction,
+                        "confidence": confidence,
+                        "expected_window": idea.expected_window,
+                        "entry": idea.entry,
+                        "stop": idea.stop,
+                        "t1": idea.t1,
+                        "t2": idea.t2,
+                        "box_high": idea.debug['box_high'],
+                        "box_low": idea.debug['box_low'],
+                        "range_pct": idea.debug['range_pct'],
+                        "atr_ratio": idea.debug['atr_ratio'],
+                        "vol_ratio": idea.debug['vol_ratio'],
+                        "break_vol_mult": idea.debug['break_vol_mult'],
+                        "extension_pct": idea.debug['extension_pct'],
+                        "market_bias": idea.debug.get('market_bias'),
+                        "vwap_ok": idea.debug['vwap_ok'],
+                    }
+                    option_payloads = []
+                    if option_picks:
+                        for pick in option_picks:
+                            option_payloads.append({
+                                "tier": pick.tier,
+                                "contract_symbol": pick.contract.contract_symbol,
+                                "expiry": pick.contract.expiry,
+                                "strike": pick.contract.strike,
+                                "call_put": pick.contract.call_put,
+                                "bid": pick.contract.bid,
+                                "ask": pick.contract.ask,
+                                "mid": pick.contract.mid,
+                                "spread_pct": pick.contract.spread_pct,
+                                "volume": pick.contract.volume,
+                                "oi": pick.contract.oi,
+                                "delta": pick.contract.delta,
+                                "gamma": pick.contract.gamma,
+                                "theta": pick.contract.theta,
+                                "iv": pick.contract.iv,
+                                "iv_percentile": pick.contract.iv_percentile,
+                                "rationale": pick.rationale,
+                                "exit_plan": pick.exit_plan,
+                            })
+
+                    texts = alert_service.build_alert_texts(alert_dict, option_payloads if option_payloads else None)
+                    try:
+                        status_code, tg_resp = alert_service.send_telegram_message(texts['short'])
+                    except Exception as exc:  # noqa: BLE001
+                        error_count += 1
+                        symbol_error_recorded = True
+                        logger.info(
+                            "alert send result",
+                            symbol=symbol,
+                            channel="telegram",
+                            result="failed",
+                            reason=str(exc),
+                            status_code=None,
+                        )
+                        raise
+                    sent_success = status_code == 200
+                    if status_code is None:
+                        reason = tg_resp or "no-status"
+                    elif status_code != 200:
+                        reason = f"status_code={status_code}"
+                    else:
+                        reason = "ok"
+                    logger.info(
+                        "alert send result",
+                        symbol=symbol,
+                        channel="telegram",
+                        result="sent" if sent_success else "failed",
+                        reason=reason,
+                        status_code=status_code,
+                    )
+                    logger.debug("telegram response", symbol=symbol, response=tg_resp)
+
+                    alert_row = Alert(
+                        symbol=symbol,
+                        direction=idea.direction,
+                        confidence=confidence,
+                        expected_window=idea.expected_window,
+                        entry=idea.entry,
+                        stop=idea.stop,
+                        t1=idea.t1,
+                        t2=idea.t2,
+                        box_high=alert_dict['box_high'],
+                        box_low=alert_dict['box_low'],
+                        range_pct=alert_dict['range_pct'],
+                        atr_ratio=alert_dict['atr_ratio'],
+                        vol_ratio=alert_dict['vol_ratio'],
+                        break_vol_mult=alert_dict['break_vol_mult'],
+                        extension_pct=alert_dict['extension_pct'],
+                        market_bias=alert_dict['market_bias'],
+                        vwap_ok=alert_dict['vwap_ok'],
+                        alert_text_short=texts['short'],
+                        alert_text_medium=texts['medium'],
+                        alert_text_deep=texts['deep_dive'],
+                        telegram_status_code=status_code,
+                        telegram_response=tg_resp,
+                    )
+                    session.add(alert_row)
+                    session.flush()
+                    logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
+
+                    for op in option_payloads:
+                        oc = OptionCandidate(alert_id=alert_row.id, **op)
+                        session.add(oc)
+
+                    alerts_triggered.append({"symbol": symbol, "direction": idea.direction, "confidence": confidence})
+                    triggered_count += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(f"scan error for {symbol}: {exc}")
+                    if not symbol_error_recorded:
+                        error_count += 1
                     continue
 
-                alert_dict = {
-                    "symbol": symbol,
-                    "direction": idea.direction,
-                    "confidence": confidence,
-                    "expected_window": idea.expected_window,
-                    "entry": idea.entry,
-                    "stop": idea.stop,
-                    "t1": idea.t1,
-                    "t2": idea.t2,
-                    "box_high": idea.debug['box_high'],
-                    "box_low": idea.debug['box_low'],
-                    "range_pct": idea.debug['range_pct'],
-                    "atr_ratio": idea.debug['atr_ratio'],
-                    "vol_ratio": idea.debug['vol_ratio'],
-                    "break_vol_mult": idea.debug['break_vol_mult'],
-                    "extension_pct": idea.debug['extension_pct'],
-                    "market_bias": idea.debug.get('market_bias'),
-                    "vwap_ok": idea.debug['vwap_ok'],
-                }
-                option_payloads = []
-                if option_picks:
-                    for pick in option_picks:
-                        option_payloads.append({
-                            "tier": pick.tier,
-                            "contract_symbol": pick.contract.contract_symbol,
-                            "expiry": pick.contract.expiry,
-                            "strike": pick.contract.strike,
-                            "call_put": pick.contract.call_put,
-                            "bid": pick.contract.bid,
-                            "ask": pick.contract.ask,
-                            "mid": pick.contract.mid,
-                            "spread_pct": pick.contract.spread_pct,
-                            "volume": pick.contract.volume,
-                            "oi": pick.contract.oi,
-                            "delta": pick.contract.delta,
-                            "gamma": pick.contract.gamma,
-                            "theta": pick.contract.theta,
-                            "iv": pick.contract.iv,
-                            "iv_percentile": pick.contract.iv_percentile,
-                            "rationale": pick.rationale,
-                            "exit_plan": pick.exit_plan,
-                        })
+            scan_run.finished_at = datetime.utcnow()
+            scan_run.symbols_scanned = settings.universe_list()
+            scan_run.errors_count = error_count
 
-                texts = alert_service.build_alert_texts(alert_dict, option_payloads if option_payloads else None)
-                status_code, tg_resp = alert_service.send_telegram_message(texts['short'])
-                sent_success = status_code == 200
-                if status_code is None:
-                    reason = tg_resp or "no-status"
-                elif status_code != 200:
-                    reason = f"status_code={status_code}"
-                else:
-                    reason = "ok"
-                logger.info(
-                    "alert send result",
-                    symbol=symbol,
-                    channel="telegram",
-                    result="sent" if sent_success else "failed",
-                    reason=reason,
-                    status_code=status_code,
-                )
-                logger.debug("telegram response", symbol=symbol, response=tg_resp)
+        result = {"alerts": alerts_triggered, "notes": scan_notes}
+    finally:
+        duration_ms = int((time.perf_counter() - scan_start_ts) * 1000)
+        logger.info(
+            "scan end",
+            duration_ms=duration_ms,
+            scanned_count=scanned_count,
+            triggered_count=triggered_count,
+            error_count=error_count,
+        )
 
-                alert_row = Alert(
-                    symbol=symbol,
-                    direction=idea.direction,
-                    confidence=confidence,
-                    expected_window=idea.expected_window,
-                    entry=idea.entry,
-                    stop=idea.stop,
-                    t1=idea.t1,
-                    t2=idea.t2,
-                    box_high=alert_dict['box_high'],
-                    box_low=alert_dict['box_low'],
-                    range_pct=alert_dict['range_pct'],
-                    atr_ratio=alert_dict['atr_ratio'],
-                    vol_ratio=alert_dict['vol_ratio'],
-                    break_vol_mult=alert_dict['break_vol_mult'],
-                    extension_pct=alert_dict['extension_pct'],
-                    market_bias=alert_dict['market_bias'],
-                    vwap_ok=alert_dict['vwap_ok'],
-                    alert_text_short=texts['short'],
-                    alert_text_medium=texts['medium'],
-                    alert_text_deep=texts['deep_dive'],
-                    telegram_status_code=status_code,
-                    telegram_response=tg_resp,
-                )
-                session.add(alert_row)
-                session.flush()
-                logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
-
-                for op in option_payloads:
-                    oc = OptionCandidate(alert_id=alert_row.id, **op)
-                    session.add(oc)
-
-                alerts_triggered.append({"symbol": symbol, "direction": idea.direction, "confidence": confidence})
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(f"scan error for {symbol}: {exc}")
-                errors += 1
-                continue
-
-        scan_run.finished_at = datetime.utcnow()
-        scan_run.symbols_scanned = settings.universe_list()
-        scan_run.errors_count = errors
-
-    duration_ms = int((time.perf_counter() - scan_start) * 1000)
-    logger.info(
-        "scan end",
-        duration_ms=duration_ms,
-        scanned_count=scanned_count,
-        alerts_triggered=len(alerts_triggered),
-        triggered_count=len(alerts_triggered),
-        errors_count=errors,
-    )
-
-    return {"alerts": alerts_triggered, "notes": scan_notes}
+    return result
 
 
 async def worker_loop() -> None:
