@@ -42,6 +42,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     scanned_count = 0
     triggered_count = 0
     error_count = 0
+    scan_reason: str | None = None
     start = time.monotonic()
 
     logger.info(f"scan start | universe_count={universe_count}")
@@ -57,6 +58,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 scan_run.finished_at = datetime.utcnow()
                 scan_run.notes = "Outside RTH"
                 result = {"alerts": [], "notes": "Outside RTH"}
+                scan_reason = "outside_window"
                 return result
 
             market_symbol = "QQQ"
@@ -292,9 +294,19 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         result = {"alerts": alerts_triggered, "notes": scan_notes}
     finally:
         duration_ms = int((time.monotonic() - start) * 1000)
-        logger.info(
-            f"scan end | duration_ms={duration_ms} scanned={scanned_count} triggered={triggered_count} errors={error_count}"
+        if universe_count > 0 and scanned_count == 0:
+            logger.warning(
+                f"scan anomaly | universe_count={universe_count} scanned=0 reason=skipped_loop_or_gate"
+            )
+
+        scan_end_message = (
+            f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
+            f"triggered={triggered_count} errors={error_count}"
         )
+        if scan_reason:
+            scan_end_message = f"{scan_end_message} reason={scan_reason}"
+
+        logger.info(scan_end_message)
 
     return result
 
