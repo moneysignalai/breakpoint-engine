@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 import re
 from typing import Any, Dict
 
@@ -204,6 +204,11 @@ def _format_vwap(value: Any) -> str:
 
 
 def _format_timestamp_et(alert: Dict[str, Any]) -> str:
+    dt_et = _get_alert_datetime_et(alert)
+    return dt_et.strftime("%Y-%m-%d %I:%M %p ET")
+
+
+def _get_alert_datetime_et(alert: Dict[str, Any]) -> datetime:
     tz = ZoneInfo(settings.TIMEZONE)
     alert_ts = alert.get("ts") or alert.get("triggered_at") or alert.get("created_at")
     try:
@@ -219,7 +224,25 @@ def _format_timestamp_et(alert: Dict[str, Any]) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     dt_et = dt.astimezone(tz)
-    return dt_et.strftime("%Y-%m-%d %I:%M %p ET")
+    return dt_et
+
+
+def _format_session_label(alert: Dict[str, Any]) -> str:
+    dt_et = _get_alert_datetime_et(alert)
+    t = dt_et.time()
+    rth_start = time(9, 30)
+    rth_end = time(16, 0)
+    ah_start = time(16, 0)
+    ah_end = time(20, 0)
+    pmkt_start = time(4, 0)
+
+    if rth_start <= t <= rth_end:
+        return "📍 RTH"
+    if ah_start < t <= ah_end or t > ah_end:
+        return "🌙 AH"
+    if pmkt_start <= t < rth_start:
+        return "🌅 PMKT"
+    return "🌅 PMKT"
 
 
 def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | None = None) -> dict[str, str]:
@@ -252,14 +275,21 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     bias_text = _format_market_bias(market_bias)
     expected_window_text = _format_expected_window(expected_window)
     ts_et = _format_timestamp_et(alert)
+    session_label = _format_session_label(alert)
     box_timeframe = "5m"
     vol_text = f"{float(break_vol_mult):.2f}" if isinstance(break_vol_mult, (int, float)) else "N/A"
-    trend_description = _format_market_bias(direction)
+    direction_norm = str(direction).upper() if direction is not None else None
+    if direction_norm == "LONG":
+        trend_description = "Uptrend"
+    elif direction_norm == "SHORT":
+        trend_description = "Downtrend"
+    else:
+        trend_description = "Range"
 
     standard_lines = [
         "────────────────────────────────",
         f"⚡ BREAKPOINT ALERT — {symbol}",
-        f"🕒 {ts_et} · ⏱ RTH · 📊 Market Context: {bias_text}",
+        f"🕒 {ts_et} · ⏱ {session_label} · 🧭 Bias: {bias_text}",
         "",
         "🧠 SETUP",
         (
