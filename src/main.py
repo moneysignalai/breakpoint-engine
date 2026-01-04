@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import platform
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -21,6 +23,9 @@ configure_logging("web")
 app = FastAPI(title="Breakout Engine")
 settings = get_settings()
 DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() == "true"
+
+_debug_sample_alert_lock = threading.Lock()
+_last_debug_sample_alert_ts = 0.0
 
 logger.info(
     "web boot",
@@ -106,11 +111,28 @@ def test_telegram() -> Dict[str, bool]:
 
 
 @app.post("/debug/send-sample-alert")
-def send_sample_alert() -> Dict[str, bool]:
+def send_sample_alert() -> Dict[str, Any]:
+    global _last_debug_sample_alert_ts
+
     if not DEBUG_ENDPOINTS_ENABLED:
         raise HTTPException(status_code=404)
 
     logger.info("debug sample alert requested")
+
+    with _debug_sample_alert_lock:
+        now = time.time()
+        elapsed = now - _last_debug_sample_alert_ts
+        if elapsed < 30:
+            retry_after = int(30 - elapsed)
+            logger.info("debug sample alert suppressed (cooldown)")
+            return {
+                "ok": True,
+                "sent": False,
+                "reason": "cooldown",
+                "retry_after_sec": retry_after,
+            }
+
+        _last_debug_sample_alert_ts = now
 
     sample_alert = {
         "symbol": "SPY",
