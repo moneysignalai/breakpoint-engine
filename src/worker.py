@@ -37,15 +37,17 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     started_at = datetime.utcnow()
     scan_notes = []
     alerts_triggered: List[Dict[str, Any]] = []
+    universe = settings.universe_list()
+    universe_count = len(universe)
     scanned_count = 0
     triggered_count = 0
     error_count = 0
-    scan_start_ts = time.perf_counter()
+    scan_start_ts = time.monotonic()
 
     logger.info(
         "scan start",
         event="scan_start",
-        universe_count=len(settings.universe_list()),
+        universe_count=universe_count,
         rth_only=settings.RTH_ONLY,
         is_rth=is_rth(),
     )
@@ -78,7 +80,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 logger.exception("market bars fetch failed", symbol=market_symbol)
                 raise
 
-            for symbol in settings.universe_list():
+            for symbol in universe:
                 scanned_count += 1
                 symbol_error_recorded = False
                 try:
@@ -300,12 +302,12 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     continue
 
             scan_run.finished_at = datetime.utcnow()
-            scan_run.symbols_scanned = settings.universe_list()
+            scan_run.symbols_scanned = universe
             scan_run.errors_count = error_count
 
         result = {"alerts": alerts_triggered, "notes": scan_notes}
     finally:
-        duration_ms = int((time.perf_counter() - scan_start_ts) * 1000)
+        duration_ms = int((time.monotonic() - scan_start_ts) * 1000)
         logger.info(
             "scan end",
             duration_ms=duration_ms,
