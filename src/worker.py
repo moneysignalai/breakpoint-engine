@@ -42,15 +42,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     scanned_count = 0
     triggered_count = 0
     error_count = 0
-    scan_start_ts = time.monotonic()
+    start = time.monotonic()
 
-    logger.info(
-        "scan start",
-        event="scan_start",
-        universe_count=universe_count,
-        rth_only=settings.RTH_ONLY,
-        is_rth=is_rth(),
-    )
+    logger.info(f"scan start | universe_count={universe_count}")
     result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
 
     try:
@@ -236,12 +230,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         error_count += 1
                         symbol_error_recorded = True
                         logger.info(
-                            "alert send result",
-                            symbol=symbol,
-                            channel="telegram",
-                            result="failed",
-                            reason=str(exc),
-                            status_code=None,
+                            f"alert send result | symbol={symbol} channel=telegram result=failed status_code=None reason={str(exc)}"
                         )
                         raise
                     sent_success = status_code == 200
@@ -252,12 +241,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     else:
                         reason = "ok"
                     logger.info(
-                        "alert send result",
-                        symbol=symbol,
-                        channel="telegram",
-                        result="sent" if sent_success else "failed",
-                        reason=reason,
-                        status_code=status_code,
+                        f"alert send result | symbol={symbol} channel=telegram result={'sent' if sent_success else 'failed'} status_code={status_code} reason={reason}"
                     )
                     logger.debug("telegram response", symbol=symbol, response=tg_resp)
 
@@ -307,13 +291,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
         result = {"alerts": alerts_triggered, "notes": scan_notes}
     finally:
-        duration_ms = int((time.monotonic() - scan_start_ts) * 1000)
+        duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
-            "scan end",
-            duration_ms=duration_ms,
-            scanned_count=scanned_count,
-            triggered_count=triggered_count,
-            error_count=error_count,
+            f"scan end | duration_ms={duration_ms} scanned={scanned_count} triggered={triggered_count} errors={error_count}"
         )
 
     return result
