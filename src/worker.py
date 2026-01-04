@@ -39,6 +39,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     scan_notes = []
     errors = 0
     alerts_triggered: List[Dict[str, Any]] = []
+    scanned_count = 0
 
     logger.info(
         "scan start",
@@ -72,6 +73,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             raise
 
         for symbol in settings.universe_list():
+            scanned_count += 1
             try:
                 bars_start = time.perf_counter()
                 try:
@@ -211,12 +213,22 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
                 texts = alert_service.build_alert_texts(alert_dict, option_payloads if option_payloads else None)
                 status_code, tg_resp = alert_service.send_telegram_message(texts['short'])
+                sent_success = status_code == 200
+                if status_code is None:
+                    reason = tg_resp or "no-status"
+                elif status_code != 200:
+                    reason = f"status_code={status_code}"
+                else:
+                    reason = "ok"
                 logger.info(
-                    "telegram send",
+                    "alert send result",
                     symbol=symbol,
+                    channel="telegram",
+                    result="sent" if sent_success else "failed",
+                    reason=reason,
                     status_code=status_code,
-                    response=tg_resp,
                 )
+                logger.debug("telegram response", symbol=symbol, response=tg_resp)
 
                 alert_row = Alert(
                     symbol=symbol,
@@ -264,7 +276,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     logger.info(
         "scan end",
         duration_ms=duration_ms,
+        scanned_count=scanned_count,
         alerts_triggered=len(alerts_triggered),
+        triggered_count=len(alerts_triggered),
         errors_count=errors,
     )
 
