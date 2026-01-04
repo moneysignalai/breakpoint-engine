@@ -65,15 +65,6 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
     def log_scan_end() -> None:
         duration_ms = int((time.monotonic() - start) * 1000)
-        if (
-            universe_count > 0
-            and scanned_count == 0
-            and scan_reason in {"ok", "forced_outside_window"}
-        ):
-            logger.warning(
-                f"scan anomaly | universe_count={universe_count} scanned=0 reason=skipped_loop_or_gate"
-            )
-
         if triggered_count == 0:
             logger.info(
                 f"scan result | no alerts | scanned={scanned_count} reason={scan_reason}"
@@ -83,6 +74,16 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
             f"triggered={triggered_count} errors={error_count} reason={scan_reason}"
         )
+
+        if (
+            scan_reason in {"ok", "forced_outside_window"}
+            and universe_count > 0
+            and scanned_count == 0
+        ):
+            logger.warning(
+                f"scan anomaly | universe_count={universe_count} scanned=0 reason={scan_reason}"
+            )
+
         logger.info(scan_end_message)
 
     try:
