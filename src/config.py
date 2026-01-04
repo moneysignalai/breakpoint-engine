@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     MIN_CONFIDENCE_TO_ALERT: float = 7.5
     TIMEZONE: str = "America/New_York"
 
+    MASSIVE_BARS_PATH_TEMPLATE: str = "/markets/{symbol}/bars"
+
     MIN_AVG_DAILY_VOLUME: int = 5_000_000
     MIN_PRICE: float = 10.0
     MAX_PRICE: float = 1000.0
