@@ -70,6 +70,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 f"scan anomaly | universe_count={universe_count} scanned=0 reason=skipped_loop_or_gate"
             )
 
+        if triggered_count == 0:
+            logger.info(
+                f"scan result | no alerts | scanned={scanned_count} reason={scan_reason}"
+            )
+
         scan_end_message = (
             f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
             f"triggered={triggered_count} errors={error_count} reason={scan_reason}"
