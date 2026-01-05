@@ -66,6 +66,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         f"scan start | universe_count={universe_count} window={window_label}"
     )
     result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
+    scan_run: ScanRun | None = None
+    db_persist_available = True
 
     def reason_from_exception(exc: Exception) -> str:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -100,19 +102,35 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
     try:
         with session_scope() as session:
-            scan_run = ScanRun(started_at=started_at, finished_at=None, universe=settings.UNIVERSE, symbols_scanned=[])
-            session.add(scan_run)
-            session.flush()
+            try:
+                scan_run = ScanRun(
+                    started_at=started_at,
+                    finished_at=None,
+                    universe=settings.UNIVERSE,
+                    symbols_scanned=[],
+                )
+                session.add(scan_run)
+                session.flush()
+            except Exception as exc:  # noqa: BLE001
+                db_persist_available = False
+                scan_reason = "db_error"
+                logger.exception(
+                    f"scan failed | reason=db_error error={str(exc)}"
+                )
+                session.rollback()
 
             allowed_window = in_allowed_window(now)
             if not allowed_window:
-                scan_run.finished_at = datetime.utcnow()
-                scan_run.notes = "Outside allowed window"
+                if db_persist_available and scan_run:
+                    scan_run.finished_at = datetime.utcnow()
+                    scan_run.notes = "Outside allowed window"
                 result = {"alerts": [], "notes": "Outside allowed window"}
                 if settings.SCAN_OUTSIDE_WINDOW:
-                    scan_reason = "forced_outside_window"
+                    if scan_reason == "ok":
+                        scan_reason = "forced_outside_window"
                 else:
-                    scan_reason = "outside_window"
+                    if scan_reason == "ok":
+                        scan_reason = "outside_window"
                     return result
 
             market_symbol = "QQQ"
@@ -130,9 +148,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 )
             except Exception as exc:  # noqa: BLE001
                 error_count += 1
-                scan_reason = "api_error"
-                scan_run.finished_at = datetime.utcnow()
-                scan_run.notes = "Market bars fetch failed"
+                if scan_reason == "ok":
+                    scan_reason = "api_error"
+                if db_persist_available and scan_run:
+                    scan_run.finished_at = datetime.utcnow()
+                    scan_run.notes = "Market bars fetch failed"
                 logger.warning(
                     "scan symbol error",
                     symbol=market_symbol,
@@ -394,13 +414,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         telegram_status_code=status_code,
                         telegram_response=tg_resp,
                     )
-                    session.add(alert_row)
-                    session.flush()
-                    logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
+                    if db_persist_available:
+                        session.add(alert_row)
+                        session.flush()
+                        logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
 
-                    for op in option_payloads:
-                        oc = OptionCandidate(alert_id=alert_row.id, **op)
-                        session.add(oc)
+                        for op in option_payloads:
+                            oc = OptionCandidate(alert_id=alert_row.id, **op)
+                            session.add(oc)
 
                     alerts_triggered.append(
                         {"symbol": symbol, "direction": idea.direction, "confidence": confidence}
@@ -417,13 +438,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     "Massive bars endpoint returned 404 (check MASSIVE_BARS_PATH_TEMPLATE)"
                 )
 
-            scan_run.finished_at = datetime.utcnow()
-            scan_run.symbols_scanned = universe
-            scan_run.errors_count = error_count
+            if db_persist_available and scan_run:
+                scan_run.finished_at = datetime.utcnow()
+                scan_run.symbols_scanned = universe
+                scan_run.errors_count = error_count
 
         result = {"alerts": alerts_triggered, "notes": scan_notes}
     except Exception as exc:  # noqa: BLE001
-        scan_reason = "api_error"
+        if scan_reason == "ok":
+            scan_reason = "api_error"
         logger.exception("scan failed", error=str(exc))
         result = {"alerts": alerts_triggered, "notes": scan_notes}
     finally:
