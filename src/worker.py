@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import platform
 import time
 from datetime import datetime, timezone
@@ -63,6 +64,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     window_label = get_window_label()
 
     logger.info(
+        "scan window sanity",
+        now_utc=datetime.utcnow().isoformat(),
+        now_local_et=datetime.now(ZoneInfo("America/New_York")).isoformat(),
+        window_label=window_label,
+        scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+    )
+
+    logger.info(
         f"scan start | universe_count={universe_count} window={window_label} "
         f"scan_outside_window={settings.SCAN_OUTSIDE_WINDOW}"
     )
@@ -89,6 +98,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 return str(request.url)
         return None
 
+    def append_run_note(note: str) -> None:
+        if db_persist_available and scan_run:
+            if scan_run.notes:
+                scan_run.notes = f"{scan_run.notes}\n{note}"
+            else:
+                scan_run.notes = note
+
     def log_scan_end() -> None:
         duration_ms = int((time.monotonic() - start) * 1000)
         effective_reason = scan_reason
@@ -111,11 +127,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         with session_scope() as session:
             try:
                 stored_universe = settings.UNIVERSE
-                if stored_universe and len(stored_universe) > 2000:
-                    stored_universe = (
-                        f"len={len(universe)} "
-                        f"first10={','.join(universe[:10])} … last10={','.join(universe[-10:])}"
-                    )
+                universe_note: str | None = None
+                if stored_universe and len(stored_universe) > 1000:
+                    universe_json = json.dumps(universe)
+                    if len(universe_json) > 1000:
+                        stored_universe = universe_json[:1000]
+                        universe_note = universe_json
+                    else:
+                        stored_universe = universe_json
 
                 scan_run = ScanRun(
                     started_at=started_at,
@@ -125,6 +144,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 )
                 session.add(scan_run)
                 session.flush()
+                if universe_note:
+                    append_run_note(universe_note)
             except Exception as exc:  # noqa: BLE001
                 db_persist_available = False
                 scan_reason = "db_error"
@@ -147,7 +168,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             if not allowed_window:
                 if db_persist_available and scan_run:
                     scan_run.finished_at = datetime.utcnow()
-                    scan_run.notes = "Outside allowed window"
+                    append_run_note("Outside allowed window")
                 result = {"alerts": [], "notes": "Outside allowed window"}
                 if settings.SCAN_OUTSIDE_WINDOW:
                     if scan_reason == "ok":
@@ -186,7 +207,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     scan_reason = "api_error"
                 if db_persist_available and scan_run:
                     scan_run.finished_at = datetime.utcnow()
-                    scan_run.notes = "Market bars fetch failed"
+                    append_run_note("Market bars fetch failed")
                 endpoint = extract_endpoint(exc)
                 logger.error(
                     "market bars fetch failed",
@@ -274,16 +295,21 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     )
 
                     daily_start = time.perf_counter()
+                    daily = None
                     try:
                         daily = client.get_daily_snapshot(symbol)
                     except Exception as exc:  # noqa: BLE001
-                        record_symbol_error("daily", exc)
-                        continue
-                    logger.debug(
-                        "daily snapshot fetched",
-                        symbol=symbol,
-                        duration_ms=int((time.perf_counter() - daily_start) * 1000),
-                    )
+                        logger.warning(
+                            "snapshot unavailable, continuing with bars only",
+                            symbol=symbol,
+                            error=str(exc),
+                        )
+                    else:
+                        logger.debug(
+                            "daily snapshot fetched",
+                            symbol=symbol,
+                            duration_ms=int((time.perf_counter() - daily_start) * 1000),
+                        )
 
                     idea = strategy.evaluate(symbol, bars, daily, market_bars)
                     if not idea:

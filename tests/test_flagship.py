@@ -52,3 +52,14 @@ def test_flagship_breakout_long():
     assert idea.direction == 'LONG'
     assert idea.entry > 0
     assert idea.t2 > idea.t1
+
+
+def test_flagship_handles_missing_snapshot():
+    strat = FlagshipStrategy()
+    start = datetime(2024, 1, 1, 12, 30)
+    bars = build_bars(start, 36, 100, rng=0.05, vol=100000)
+    market = build_bars(start, 36, 400, rng=0.0, vol=150000)
+
+    result = strat.evaluate("TEST", bars, None, market)
+
+    assert result is None
