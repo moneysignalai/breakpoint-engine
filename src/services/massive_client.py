@@ -31,6 +31,7 @@ class MassiveClient:
     def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
         backoff = 1.0
         url = path if path.startswith("http") else f"{self.base_url}{path}"
+        endpoint = path if path.startswith("/") else path.replace(self.base_url, "")
         retryable_status = {429, 500, 502, 503, 504}
         max_attempts = 3
         for attempt in range(max_attempts):
@@ -41,7 +42,7 @@ class MassiveClient:
                 elapsed_ms = int((time.perf_counter() - start) * 1000)
                 logger.error(
                     "Massive request error",
-                    url=url,
+                    path=endpoint,
                     symbol=symbol,
                     elapsed_ms=elapsed_ms,
                     error=str(exc),
@@ -55,13 +56,13 @@ class MassiveClient:
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
-            snippet = (response.text or "")[:300]
+            snippet = (response.text or "")[:200]
 
             if status_code == 404:
-                logger.error(
+                logger.warning(
                     "Massive request 404",
                     method=method,
-                    url=url,
+                    path=endpoint,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
@@ -73,7 +74,7 @@ class MassiveClient:
                 logger.warning(
                     "Massive request retryable",
                     method=method,
-                    url=url,
+                    path=endpoint,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
@@ -88,7 +89,7 @@ class MassiveClient:
                 logger.error(
                     "Massive request non-200",
                     method=method,
-                    url=url,
+                    path=endpoint,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
@@ -98,7 +99,7 @@ class MassiveClient:
 
             logger.debug(
                 "Massive request ok",
-                url=url,
+                path=endpoint,
                 symbol=symbol,
                 status_code=status_code,
                 elapsed_ms=elapsed_ms,
