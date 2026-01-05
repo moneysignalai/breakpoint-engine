@@ -107,9 +107,10 @@ class FlagshipStrategy:
             panic = True
         return bias, panic
 
-    def evaluate(self, symbol: str, bars_raw: List[Dict[str, Any]], daily: Dict[str, Any], market_bars: List[Dict[str, Any]]) -> StockIdea | None:
+    def evaluate(self, symbol: str, bars_raw: List[Dict[str, Any]], daily: Dict[str, Any] | None, market_bars: List[Dict[str, Any]]) -> StockIdea | None:
         if len(bars_raw) < settings.BOX_BARS * 3:
             return None
+        daily = daily or {}
         bars = _to_bars(bars_raw)
         closes = [b.close for b in bars]
         highs = [b.high for b in bars]

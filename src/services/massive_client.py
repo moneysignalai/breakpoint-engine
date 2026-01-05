@@ -56,13 +56,15 @@ class MassiveClient:
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
-            snippet = (response.text or "")[:200]
+            snippet = (response.text or "")[:300]
+            full_url = str(response.request.url) if response.request else url
 
             if status_code == 404:
                 logger.warning(
                     "Massive request 404",
                     method=method,
                     path=endpoint,
+                    url=full_url,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
@@ -75,6 +77,7 @@ class MassiveClient:
                     "Massive request retryable",
                     method=method,
                     path=endpoint,
+                    url=full_url,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
@@ -90,6 +93,7 @@ class MassiveClient:
                     "Massive request non-200",
                     method=method,
                     path=endpoint,
+                    url=full_url,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
@@ -145,13 +149,39 @@ class MassiveClient:
     def get_daily_snapshot(self, symbol: str) -> Dict[str, Any]:
         data = self._request(
             "GET",
-            f"/markets/{symbol}/snapshot",
-            params={"timeframe": "1d", "limit": 1},
+            f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}",
             symbol=symbol,
         )
-        if isinstance(data, dict):
-            return data
-        return data[0] if data else {}
+
+        if not isinstance(data, dict):
+            return {"avg_daily_volume": None, "volume": None, "iv_percentile": None, "raw": data}
+
+        ticker_data = data.get("ticker") if isinstance(data.get("ticker"), dict) else None
+        if ticker_data is None:
+            ticker_data = data if isinstance(data, dict) else None
+
+        if not isinstance(ticker_data, dict):
+            return {"avg_daily_volume": None, "volume": None, "iv_percentile": None, "raw": data}
+
+        day = ticker_data.get("day") or ticker_data.get("today") or {}
+
+        snapshot = {
+            "avg_daily_volume": ticker_data.get("avg_daily_volume")
+            or ticker_data.get("avgDailyVolume")
+            or day.get("v"),
+            "volume": day.get("v")
+            or ticker_data.get("volume")
+            or ticker_data.get("v"),
+            "iv_percentile": ticker_data.get("iv_percentile")
+            or ticker_data.get("ivPercentile"),
+            "raw": data,
+        }
+
+        for key, value in snapshot.items():
+            if key != "raw" and value is None:
+                snapshot[key] = None
+
+        return snapshot
 
     def get_quote(self, symbol: str) -> Dict[str, Any]:
         return self._request("GET", f"/markets/{symbol}/quote", symbol=symbol)
