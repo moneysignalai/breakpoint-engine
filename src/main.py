@@ -15,6 +15,7 @@ from src.config import get_settings
 from src.models.alert import Alert
 from src.services.alerts import build_alert_texts, send_telegram_message
 from src.services.db import session_scope, init_db
+from src.services.massive_client import MassiveClient
 from src.utils import configure_logging
 from src.worker import run_scan_once
 
@@ -50,6 +51,43 @@ def debug_settings() -> Dict[str, Any]:
     if not DEBUG_ENDPOINTS_ENABLED:
         raise HTTPException(status_code=404)
     return settings.non_secret_dict()
+
+
+@app.get("/debug/massive/health")
+def massive_health(symbol: str = "SPY") -> Dict[str, Any]:
+    if not DEBUG_ENDPOINTS_ENABLED:
+        raise HTTPException(status_code=404)
+
+    client = MassiveClient()
+    upper_symbol = symbol.upper()
+    response: Dict[str, Any] = {
+        "symbol": upper_symbol,
+        "base_url": client.base_url,
+        "base_url_source": getattr(client, "base_url_source", "unknown"),
+        "provider": client.provider,
+        "errors": [],
+    }
+
+    bars = []
+    try:
+        bars = client.get_bars(upper_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
+        response["bars_count"] = len(bars)
+        if bars:
+            last_ts = bars[-1].get("t") or bars[-1].get("ts")
+            response["last_bar_timestamp"] = last_ts
+    except Exception as exc:  # noqa: BLE001
+        response["errors"].append({"stage": "bars", "error": str(exc)})
+
+    try:
+        daily = client.get_daily_snapshot(upper_symbol)
+        response["avg_daily_volume"] = daily.get("avg_daily_volume") if isinstance(daily, dict) else None
+        response["daily_volume"] = daily.get("volume") if isinstance(daily, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        response["errors"].append({"stage": "daily_snapshot", "error": str(exc)})
+    finally:
+        client.close()
+
+    return response
 
 
 @app.post("/run-scan")

@@ -357,9 +357,10 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             duration_ms=int((time.perf_counter() - daily_start) * 1000),
                         )
 
-                    idea, debug = strategy.evaluate(symbol, bars, daily, market_bars)
+                    idea, debug, skip_decision = strategy.evaluate(symbol, bars, daily, market_bars)
                     if not idea:
                         reasons = (debug.get("skip_reasons") or ["unknown"])
+                        skip_reason = skip_decision.reason if skip_decision else reasons[0]
                         should_log_skip = skip_logs_emitted < skip_log_limit or random.randint(1, 10) == 1
                         if should_log_skip:
                             skip_logs_emitted += 1
@@ -368,11 +369,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             logger.info(
                                 "strategy skipped",
                                 symbol=symbol,
-                                reasons=";".join(reasons[:3]),
+                                strategy_name="FlagshipStrategy",
+                                skip_reason=skip_reason,
+                                details=(skip_decision.details if skip_decision else None),
                                 bar_count=inputs.get("bar_count"),
                                 close=inputs.get("last_close"),
-                                vwap=computed.get("vwap_position"),
                                 avg_volume=inputs.get("avg_volume"),
+                                market_bias=computed.get("market_bias"),
                                 box_high=computed.get("box_high"),
                                 box_low=computed.get("box_low"),
                                 breakout_pct=computed.get("breakout_pct"),
@@ -474,12 +477,18 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     candidate_scores.append((symbol, confidence, would_trigger))
 
                     if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
-                        logger.info(
-                            "alert threshold not met",
-                            symbol=symbol,
-                            confidence=confidence,
-                            min_confidence=settings.MIN_CONFIDENCE_TO_ALERT,
-                        )
+                        if skip_logs_emitted < skip_log_limit:
+                            skip_logs_emitted += 1
+                            logger.info(
+                                "strategy skipped",
+                                symbol=symbol,
+                                strategy_name="FlagshipStrategy",
+                                skip_reason="confidence_below_min",
+                                confidence=confidence,
+                                min_confidence=settings.MIN_CONFIDENCE_TO_ALERT,
+                                avg_volume=idea.debug.get("inputs", {}).get("avg_volume"),
+                                last_price=idea.debug.get("inputs", {}).get("last_close"),
+                            )
                         continue
 
                     alert_dict = {

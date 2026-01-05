@@ -34,6 +34,12 @@ class StockIdea:
     debug: Dict[str, Any]
 
 
+@dataclass
+class SkipDecision:
+    reason: str
+    details: Dict[str, Any]
+
+
 def _to_bars(raw: List[Dict[str, Any]]) -> List[Bar]:
     bars: List[Bar] = []
     for b in raw:
@@ -77,7 +83,8 @@ def _ema(values: List[float], span: int) -> List[float]:
 
 class FlagshipStrategy:
     def __init__(self, tz: str | None = None):
-        self.tz = ZoneInfo(tz or settings.TIMEZONE)
+        self.settings = get_settings()
+        self.tz = ZoneInfo(tz or self.settings.TIMEZONE)
 
     def market_bias(self, market_bars: List[Dict[str, Any]]) -> Tuple[str | None, bool]:
         bars = _to_bars(market_bars)
@@ -107,7 +114,14 @@ class FlagshipStrategy:
             panic = True
         return bias, panic
 
-    def evaluate(self, symbol: str, bars_raw: List[Dict[str, Any]], daily: Dict[str, Any] | None, market_bars: List[Dict[str, Any]]) -> Tuple[StockIdea | None, Dict[str, Any]]:
+    def evaluate(
+        self,
+        symbol: str,
+        bars_raw: List[Dict[str, Any]],
+        daily: Dict[str, Any] | None,
+        market_bars: List[Dict[str, Any]],
+    ) -> Tuple[StockIdea | None, Dict[str, Any], SkipDecision | None]:
+        settings = self.settings
         debug: Dict[str, Any] = {
             "skip_reasons": [],
             "inputs": {
@@ -116,15 +130,30 @@ class FlagshipStrategy:
             },
             "computed": {},
         }
+        skip_decision: SkipDecision | None = None
 
-        def skip(reason: str) -> Tuple[StockIdea | None, Dict[str, Any]]:
+        def skip(
+            reason: str, details: Dict[str, Any] | None = None
+        ) -> Tuple[StockIdea | None, Dict[str, Any], SkipDecision]:
+            nonlocal skip_decision
+            skip_decision = SkipDecision(reason=reason, details=details or {})
             debug["skip_reasons"].append(reason)
-            return None, debug
+            debug["skip_details"] = skip_decision.details
+            return None, debug, skip_decision
 
         if len(bars_raw) < settings.BOX_BARS * 3:
-            return skip("insufficient_bars")
+            return skip("insufficient_bars", {"bar_count": len(bars_raw)})
 
         daily = daily or {}
+        if not daily or (daily.get("avg_daily_volume") is None and daily.get("volume") is None):
+            return skip(
+                "missing_daily_snapshot",
+                {
+                    "has_daily": bool(daily),
+                    "avg_daily_volume": daily.get("avg_daily_volume"),
+                    "volume": daily.get("volume"),
+                },
+            )
         bars = _to_bars(bars_raw)
         closes = [b.close for b in bars]
         highs = [b.high for b in bars]
@@ -137,11 +166,17 @@ class FlagshipStrategy:
             "avg_volume": avg_vol,
         })
         if last_close < settings.MIN_PRICE:
-            return skip("price_below_min")
+            return skip("price_below_min", {"last_close": last_close, "min_price": settings.MIN_PRICE})
         if last_close > settings.MAX_PRICE:
-            return skip("price_above_max")
+            return skip("price_above_max", {"last_close": last_close, "max_price": settings.MAX_PRICE})
         if avg_vol < settings.MIN_AVG_DAILY_VOLUME:
-            return skip("avg_volume_below_min")
+            return skip(
+                "avg_daily_volume_below_threshold",
+                {
+                    "avg_volume": avg_vol,
+                    "min_volume": settings.MIN_AVG_DAILY_VOLUME,
+                },
+            )
 
         now = bars[-1].ts
         if now.tzinfo is None:
@@ -153,7 +188,7 @@ class FlagshipStrategy:
         windows = parse_windows(settings.ALLOWED_WINDOWS)
         if not settings.SCAN_OUTSIDE_WINDOW:
             if not any(start <= now.time() <= end for start, end in windows):
-                return skip("outside_allowed_window")
+                return skip("window_gate", {"now": now.time(), "windows": settings.ALLOWED_WINDOWS})
         else:
             debug["computed"]["window_override"] = True
 
@@ -184,18 +219,27 @@ class FlagshipStrategy:
             }
         )
         if range_pct > settings.BOX_MAX_RANGE_PCT:
-            return skip("box_range_too_wide")
+            return skip(
+                "box_range_too_wide",
+                {
+                    "range_pct": range_pct,
+                    "max_range_pct": settings.BOX_MAX_RANGE_PCT,
+                },
+            )
 
         atr_series = _atr(highs, lows, closes)
         if len(atr_series) < 15:
-            return skip("atr_insufficient_history")
+            return skip("atr_insufficient_history", {"atr_points": len(atr_series)})
         atr_current = atr_series[-1]
         atr_mean_50 = sum(atr_series[-50:]) / len(atr_series[-50:]) if len(atr_series) >= 50 else sum(atr_series) / len(atr_series)
         atr_ratio = atr_current / atr_mean_50 if atr_mean_50 else 0
         debug["computed"]["atr_ratio"] = atr_ratio
         debug["atr_ratio"] = atr_ratio
         if atr_ratio > settings.ATR_COMP_FACTOR:
-            return skip("atr_ratio_too_high")
+            return skip(
+                "atr_ratio_too_high",
+                {"atr_ratio": atr_ratio, "max_ratio": settings.ATR_COMP_FACTOR},
+            )
 
         avg_vol_box = sum(b.volume for b in box) / len(box)
         avg_vol_prior = sum(b.volume for b in prior_box) / len(prior_box) if prior_box else avg_vol_box
@@ -203,12 +247,18 @@ class FlagshipStrategy:
         debug["computed"]["vol_ratio"] = vol_ratio
         debug["vol_ratio"] = vol_ratio
         if vol_ratio > settings.VOL_CONTRACTION_FACTOR:
-            return skip("volume_not_contracting")
+            return skip(
+                "volume_not_contracting",
+                {
+                    "vol_ratio": vol_ratio,
+                    "max_vol_ratio": settings.VOL_CONTRACTION_FACTOR,
+                },
+            )
 
         closes_outside = [b for b in box if b.close > box_high or b.close < box_low]
         debug["computed"]["closes_outside_box"] = len(closes_outside)
         if len(closes_outside) > 2:
-            return skip("too_many_closes_outside_box")
+            return skip("too_many_closes_outside_box", {"closes_outside": len(closes_outside)})
 
         break_vol_mult = breakout_bar.volume / avg_vol_box if avg_vol_box else 0
         vwap_price = _vwap(bars)
@@ -291,4 +341,5 @@ class FlagshipStrategy:
                 debug=debug,
             ),
             debug,
+            skip_decision,
         )
