@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import platform
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
 
@@ -132,6 +132,16 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     "scan run persist failed", error=str(exc)
                 )
                 session.rollback()
+
+            logger.info(
+                "scan window context",
+                now_utc=datetime.now(timezone.utc),
+                now_local_et=now.astimezone(ZoneInfo("America/New_York")),
+                settings_timezone=settings.TIMEZONE,
+                window_label=window_label,
+                rth_only=settings.RTH_ONLY,
+                scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+            )
 
             allowed_window = in_allowed_window(now)
             if not allowed_window:
