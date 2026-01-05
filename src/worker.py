@@ -62,7 +62,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
     window_label = get_window_label()
 
-    logger.info(f"scan start | universe_count={universe_count} window={window_label}")
+    logger.info(
+        f"scan start | universe_count={universe_count} window={window_label}"
+    )
     result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
 
     def reason_from_exception(exc: Exception) -> str:
@@ -347,7 +349,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     except Exception as exc:  # noqa: BLE001
                         record_symbol_error("alert_send", exc)
                         logger.info(
-                            f"alert send result | symbol={symbol} channel=telegram result=failed status_code=None reason={str(exc)}"
+                            f"alert send result | symbol={symbol} channel=telegram result=failed reason={str(exc)}"
                         )
                         continue
                     sent_success = status_code == 200
@@ -359,9 +361,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         reason = "ok"
                     if not sent_success:
                         record_symbol_error("alert_send", RuntimeError(reason))
-                    logger.info(
-                        f"alert send result | symbol={symbol} channel=telegram result={'sent' if sent_success else 'failed'} status_code={status_code} reason={reason}"
+                    result_label = "sent" if sent_success else "failed"
+                    message = (
+                        f"alert send result | symbol={symbol} channel=telegram result={result_label}"
                     )
+                    if not sent_success:
+                        message += f" reason={reason}"
+                    logger.info(message)
                     logger.debug("telegram response", symbol=symbol, response=tg_resp)
 
                     alert_row = Alert(

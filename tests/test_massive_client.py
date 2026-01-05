@@ -26,3 +26,103 @@ def test_get_bars_returns_list():
 
     assert isinstance(bars, list)
     assert bars[0]["t"] == 1
+
+
+def test_get_option_expirations_uses_reference_contracts_with_pagination():
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            assert request.url.path == "/v3/reference/options/contracts"
+            assert request.url.params["underlying_ticker"] == "SPY"
+            data = {
+                "results": [
+                    {"expiration_date": "2024-01-19"},
+                    {"expiration_date": "2024-02-16"},
+                ],
+                "next_url": "https://example.com/v3/reference/options/contracts?page=2",
+            }
+            return httpx.Response(200, json=data)
+
+        assert request.url.path == "/v3/reference/options/contracts"
+        assert request.url.params["page"] == "2"
+        data = {
+            "results": [
+                {"expiration_date": "2024-03-15"},
+                {"expiration_date": "2024-02-16"},
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    transport = httpx.MockTransport(handler)
+    client = MassiveClient(api_key="test", timeout=1.0)
+    client.base_url = "https://example.com"
+    client.client = httpx.Client(transport=transport, headers=client.client.headers)
+
+    expirations = client.get_option_expirations("SPY")
+
+    assert expirations == ["2024-01-19", "2024-02-16", "2024-03-15"]
+    assert call_count == 2
+
+
+def test_get_option_chain_uses_reference_contracts_with_pagination():
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            assert request.url.path == "/v3/reference/options/contracts"
+            assert request.url.params["expiration_date"] == "2024-02-16"
+            data = {
+                "results": [
+                    {
+                        "ticker": "SPY240216C00450000",
+                        "strike_price": 450,
+                        "expiration_date": "2024-02-16",
+                        "contract_type": "call",
+                    }
+                ],
+                "next_url": "https://example.com/v3/reference/options/contracts?page=2",
+            }
+            return httpx.Response(200, json=data)
+
+        assert request.url.params["page"] == "2"
+        data = {
+            "results": [
+                {
+                    "contract_symbol": "SPY240216P00450000",
+                    "strike_price": 450,
+                    "expiration_date": "2024-02-16",
+                    "contract_type": "put",
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    transport = httpx.MockTransport(handler)
+    client = MassiveClient(api_key="test", timeout=1.0)
+    client.base_url = "https://example.com"
+    client.client = httpx.Client(transport=transport, headers=client.client.headers)
+
+    chain = client.get_option_chain("SPY", "2024-02-16")
+
+    assert chain == [
+        {
+            "ticker": "SPY240216C00450000",
+            "contract_symbol": "SPY240216C00450000",
+            "strike_price": 450,
+            "expiration_date": "2024-02-16",
+            "contract_type": "call",
+        },
+        {
+            "ticker": "SPY240216P00450000",
+            "contract_symbol": "SPY240216P00450000",
+            "strike_price": 450,
+            "expiration_date": "2024-02-16",
+            "contract_type": "put",
+        },
+    ]
+    assert call_count == 2
