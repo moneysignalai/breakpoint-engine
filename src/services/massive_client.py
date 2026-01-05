@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
 import time
+from datetime import datetime
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
@@ -94,13 +94,14 @@ class MassiveClient:
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
-            snippet = (response.text or "")[:200]
+            snippet = (response.text or "")[:300]
             full_url = str(response.request.url) if response.request else url
 
             if status_code == 404:
                 safe_params = dict(params or {})
                 safe_params.pop("apiKey", None)
                 safe_params.pop("apikey", None)
+                safe_params.pop("api_key", None)
                 logger.warning(
                     "Massive request 404",
                     method=method,

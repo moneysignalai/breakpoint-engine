@@ -49,12 +49,15 @@ def test_flagship_breakout_long():
     market = build_bars(start, 36, 400, rng=0.0, vol=150000)
     daily = {"avg_daily_volume": 10_000_000}
 
-    idea, debug, skip_decision = strat.evaluate("TEST", bars, daily, market)
+    idea, trace = strat.evaluate("TEST", bars, daily, market)
     assert idea is not None
     assert idea.direction == 'LONG'
     assert idea.entry > 0
     assert idea.t2 > idea.t1
-    assert skip_decision is None
+    assert trace.skip_reason is None
+    assert trace.computed.get("box_high") is not None
+    assert trace.computed.get("vol_ratio") is not None
+    assert any(gate.name == "window_gate" for gate in trace.gates)
 
 
 def test_flagship_handles_missing_snapshot():
@@ -63,12 +66,10 @@ def test_flagship_handles_missing_snapshot():
     bars = build_bars(start, 36, 100, rng=0.05, vol=100000)
     market = build_bars(start, 36, 400, rng=0.0, vol=150000)
 
-    idea, debug, skip_decision = strat.evaluate("TEST", bars, None, market)
+    idea, trace = strat.evaluate("TEST", bars, None, market)
 
     assert idea is None
-    assert "missing_daily_snapshot" in debug.get("skip_reasons", [])
-    assert skip_decision is not None
-    assert skip_decision.reason == "missing_daily_snapshot"
+    assert trace.skip_reason == "missing_daily_snapshot"
 
 
 def test_flagship_window_override_allows(monkeypatch: pytest.MonkeyPatch):
@@ -93,18 +94,15 @@ def test_flagship_window_override_allows(monkeypatch: pytest.MonkeyPatch):
     market = build_bars(start, 36, 400, rng=0.0, vol=150000)
     daily = {"avg_daily_volume": 10_000_000}
 
-    idea, debug, skip_decision = strat.evaluate("TEST", bars, daily, market)
+    idea, trace = strat.evaluate("TEST", bars, daily, market)
 
     assert idea is not None
-    assert "window_gate" not in debug.get("skip_reasons", [])
-    assert skip_decision is None
+    assert trace.skip_reason is None
 
 
 def test_flagship_returns_skip_reasons():
     strat = FlagshipStrategy()
-    idea, debug, skip_decision = strat.evaluate("TEST", [], None, [])
+    idea, trace = strat.evaluate("TEST", [], None, [])
 
     assert idea is None
-    assert "insufficient_bars" in debug.get("skip_reasons", [])
-    assert skip_decision is not None
-    assert skip_decision.reason == "insufficient_bars"
+    assert trace.skip_reason == "insufficient_bars"

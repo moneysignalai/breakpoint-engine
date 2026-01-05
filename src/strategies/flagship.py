@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 from src.config import get_settings
+from src.utils.decision_trace import DecisionTrace
 from src.utils.scoring import cap_score
 
 settings = get_settings()
@@ -32,12 +33,6 @@ class StockIdea:
     expected_window: str
     confidence: float
     debug: Dict[str, Any]
-
-
-@dataclass
-class SkipDecision:
-    reason: str
-    details: Dict[str, Any]
 
 
 def _to_bars(raw: List[Dict[str, Any]]) -> List[Bar]:
@@ -120,26 +115,16 @@ class FlagshipStrategy:
         bars_raw: List[Dict[str, Any]],
         daily: Dict[str, Any] | None,
         market_bars: List[Dict[str, Any]],
-    ) -> Tuple[StockIdea | None, Dict[str, Any], SkipDecision | None]:
+        decision_trace: DecisionTrace | None = None,
+    ) -> Tuple[StockIdea | None, DecisionTrace]:
         settings = self.settings
-        debug: Dict[str, Any] = {
-            "skip_reasons": [],
-            "inputs": {
-                "bar_count": len(bars_raw),
-                "timezone": str(self.tz),
-            },
-            "computed": {},
-        }
-        skip_decision: SkipDecision | None = None
+        trace = decision_trace or DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
+        trace.add_inputs({"bar_count": len(bars_raw), "timezone": str(self.tz)})
 
-        def skip(
-            reason: str, details: Dict[str, Any] | None = None
-        ) -> Tuple[StockIdea | None, Dict[str, Any], SkipDecision]:
-            nonlocal skip_decision
-            skip_decision = SkipDecision(reason=reason, details=details or {})
-            debug["skip_reasons"].append(reason)
-            debug["skip_details"] = skip_decision.details
-            return None, debug, skip_decision
+        def skip(reason: str, details: Dict[str, Any] | None = None) -> Tuple[StockIdea | None, DecisionTrace]:
+            trace.record_gate(reason, passed=False, details=details)
+            trace.mark_skip(reason, details)
+            return None, trace
 
         if len(bars_raw) < settings.BOX_BARS * 3:
             return skip("insufficient_bars", {"bar_count": len(bars_raw)})
@@ -161,9 +146,14 @@ class FlagshipStrategy:
 
         last_close = closes[-1]
         avg_vol = daily.get('avg_daily_volume') or daily.get('volume') or 0
-        debug["inputs"].update({
+        trace.add_inputs({
             "last_close": last_close,
             "avg_volume": avg_vol,
+        })
+        trace.add_computeds({
+            "min_price": settings.MIN_PRICE,
+            "max_price": settings.MAX_PRICE,
+            "min_avg_volume": settings.MIN_AVG_DAILY_VOLUME,
         })
         if last_close < settings.MIN_PRICE:
             return skip("price_below_min", {"last_close": last_close, "min_price": settings.MIN_PRICE})
@@ -182,21 +172,30 @@ class FlagshipStrategy:
         if now.tzinfo is None:
             now = now.replace(tzinfo=self.tz)
         now = now.astimezone(self.tz)
-        debug["computed"]["as_of"] = now
+        trace.add_computed("as_of", now)
         from src.services.market_time import parse_windows  # local import
 
         windows = parse_windows(settings.ALLOWED_WINDOWS)
-        if not settings.SCAN_OUTSIDE_WINDOW:
-            if not any(start <= now.time() <= end for start, end in windows):
-                return skip("window_gate", {"now": now.time(), "windows": settings.ALLOWED_WINDOWS})
-        else:
-            debug["computed"]["window_override"] = True
+        window_ok = any(start <= now.time() <= end for start, end in windows)
+        trace.record_gate(
+            "window_gate",
+            passed=window_ok or settings.SCAN_OUTSIDE_WINDOW,
+            details={
+                "now": now.time(),
+                "windows": settings.ALLOWED_WINDOWS,
+                "scan_outside_window": settings.SCAN_OUTSIDE_WINDOW,
+            },
+        )
+        if not settings.SCAN_OUTSIDE_WINDOW and not window_ok:
+            return skip("window_gate", {"now": now.time(), "windows": settings.ALLOWED_WINDOWS})
+        if settings.SCAN_OUTSIDE_WINDOW:
+            trace.add_computed("window_override", True)
 
         if market_bars:
             market_bias, panic = self.market_bias(market_bars)
         else:
             market_bias, panic = None, False
-        debug["computed"]["market_bias"] = market_bias
+        trace.add_computeds({"market_bias": market_bias, "market_panic": panic})
         if panic:
             return skip("market_panic")
 
@@ -206,18 +205,11 @@ class FlagshipStrategy:
         box_high = max(b.high for b in box)
         box_low = min(b.low for b in box)
         range_pct = (box_high - box_low) / last_close
-        debug["computed"].update({
+        trace.add_computeds({
             "box_high": box_high,
             "box_low": box_low,
             "range_pct": range_pct,
         })
-        debug.update(
-            {
-                "box_high": box_high,
-                "box_low": box_low,
-                "range_pct": range_pct,
-            }
-        )
         if range_pct > settings.BOX_MAX_RANGE_PCT:
             return skip(
                 "box_range_too_wide",
@@ -233,8 +225,7 @@ class FlagshipStrategy:
         atr_current = atr_series[-1]
         atr_mean_50 = sum(atr_series[-50:]) / len(atr_series[-50:]) if len(atr_series) >= 50 else sum(atr_series) / len(atr_series)
         atr_ratio = atr_current / atr_mean_50 if atr_mean_50 else 0
-        debug["computed"]["atr_ratio"] = atr_ratio
-        debug["atr_ratio"] = atr_ratio
+        trace.add_computeds({"atr_ratio": atr_ratio, "atr_mean_50": atr_mean_50})
         if atr_ratio > settings.ATR_COMP_FACTOR:
             return skip(
                 "atr_ratio_too_high",
@@ -244,8 +235,7 @@ class FlagshipStrategy:
         avg_vol_box = sum(b.volume for b in box) / len(box)
         avg_vol_prior = sum(b.volume for b in prior_box) / len(prior_box) if prior_box else avg_vol_box
         vol_ratio = avg_vol_box / avg_vol_prior if avg_vol_prior else 1
-        debug["computed"]["vol_ratio"] = vol_ratio
-        debug["vol_ratio"] = vol_ratio
+        trace.add_computeds({"vol_ratio": vol_ratio, "avg_vol_box": avg_vol_box, "avg_vol_prior": avg_vol_prior})
         if vol_ratio > settings.VOL_CONTRACTION_FACTOR:
             return skip(
                 "volume_not_contracting",
@@ -256,7 +246,7 @@ class FlagshipStrategy:
             )
 
         closes_outside = [b for b in box if b.close > box_high or b.close < box_low]
-        debug["computed"]["closes_outside_box"] = len(closes_outside)
+        trace.add_computed("closes_outside_box", len(closes_outside))
         if len(closes_outside) > 2:
             return skip("too_many_closes_outside_box", {"closes_outside": len(closes_outside)})
 
@@ -264,32 +254,25 @@ class FlagshipStrategy:
         vwap_price = _vwap(bars)
         extension_pct = (last_close - box_high) / box_high if last_close >= box_high else (box_low - last_close) / box_low
         breakout_pct = (last_close - box_high) / box_high if last_close >= box_high else (box_low - last_close) / box_low
-        debug["computed"].update({
+        trace.add_computeds({
             "break_vol_mult": break_vol_mult,
             "extension_pct": extension_pct,
             "vwap": vwap_price,
             "vwap_position": "Above" if last_close > vwap_price else "Below",
             "breakout_pct": breakout_pct,
         })
-        debug.update(
-            {
-                "break_vol_mult": break_vol_mult,
-                "extension_pct": extension_pct,
-                "market_bias": market_bias,
-            }
-        )
 
         direction = None
         if last_close >= box_high * (1 + settings.BREAK_BUFFER_PCT) and break_vol_mult >= settings.BREAK_VOL_MULT and last_close <= box_high * (1 + settings.MAX_EXTENSION_PCT):
             if not settings.VWAP_CONFIRM or last_close > vwap_price:
                 direction = 'LONG'
             else:
-                debug["skip_reasons"].append("vwap_not_confirmed")
+                trace.mark_skip("vwap_not_confirmed")
         if last_close <= box_low * (1 - settings.BREAK_BUFFER_PCT) and break_vol_mult >= settings.BREAK_VOL_MULT and last_close >= box_low * (1 - settings.MAX_EXTENSION_PCT):
             if not settings.VWAP_CONFIRM or last_close < vwap_price:
                 direction = 'SHORT'
             else:
-                debug["skip_reasons"].append("vwap_not_confirmed")
+                trace.mark_skip("vwap_not_confirmed")
 
         if not direction:
             return skip("no_breakout_direction")
@@ -321,13 +304,12 @@ class FlagshipStrategy:
                 confidence += 0.5
         confidence = cap_score(confidence)
 
-        debug["computed"].update(
+        trace.add_computeds(
             {
                 "vwap_ok": vwap_ok,
                 "score": confidence,
             }
         )
-        debug["debug_reasons"] = []
         return (
             StockIdea(
                 symbol=symbol,
@@ -338,8 +320,7 @@ class FlagshipStrategy:
                 t2=t2,
                 expected_window=expected_window,
                 confidence=confidence,
-                debug=debug,
+                debug=trace.as_dict(),
             ),
-            debug,
-            skip_decision,
+            trace,
         )
