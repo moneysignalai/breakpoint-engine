@@ -39,6 +39,10 @@ logger.info(
 _startup_test_alert_sent = False
 
 
+def _safe_kv_summary(items: list[tuple[str, int]], limit: int = 12) -> str:
+    return ", ".join([f"{key}={value}" for key, value in items[:limit]])
+
+
 def send_startup_test_alert(client: MassiveClient, universe_count: int) -> None:
     global _startup_test_alert_sent
     if _startup_test_alert_sent or not settings.TEST_ALERT_ON_START:
@@ -150,12 +154,27 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         avg_score = sum(scores) / len(scores)
         above = sum(1 for _, score, _ in candidate_scores if score >= settings.MIN_CONFIDENCE_TO_ALERT)
         below = len(candidate_scores) - above
+        bin_ranges = [(round(i / 5, 1), round((i + 1) / 5, 1)) for i in range(5)]
+        bins_struct = []
+        for start, end in bin_ranges:
+            count = sum(
+                1
+                for _, score, _ in candidate_scores
+                if start <= score < end or (end == 1.0 and score <= end)
+            )
+            bins_struct.append({"start": start, "end": end, "count": count})
+        bin_summary = _safe_kv_summary(
+            [
+                (f"{bin_info['start']:.1f}-{bin_info['end']:.1f}", bin_info["count"])
+                for bin_info in bins_struct
+            ]
+        )
         message = (
             "confidence distribution | "
             f"candidates={len(candidate_scores)} min={round(min_score, 3)} "
             f"max={round(max_score, 3)} avg={round(avg_score, 3)} "
             f"above_threshold={above} below_threshold={below} "
-            f"threshold={settings.MIN_CONFIDENCE_TO_ALERT}"
+            f"threshold={settings.MIN_CONFIDENCE_TO_ALERT} bins={bin_summary}"
         )
         logger.info(
             message,
@@ -166,17 +185,18 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             above_threshold=above,
             below_threshold=below,
             threshold=settings.MIN_CONFIDENCE_TO_ALERT,
+            bins=bins_struct,
         )
 
     def log_skip_summary() -> None:
         if not skip_reasons:
             return
-        reasons_list = [
-            {"reason": reason, "count": count} for reason, count in skip_reasons.most_common()
-        ]
+        top = skip_reasons.most_common(12)
+        total = sum(skip_reasons.values())
+        summary = _safe_kv_summary(top)
         logger.info(
-            f"skip reasons summary | {json.dumps(reasons_list)}",
-            reasons=reasons_list,
+            f"skip reasons summary | total={total} | top={summary}",
+            reasons=[{"reason": reason, "count": count} for reason, count in top],
         )
 
     if debug_symbol:
