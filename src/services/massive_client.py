@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
@@ -55,11 +55,12 @@ class MassiveClient:
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
-            snippet = (response.text or "")[:200]
+            snippet = (response.text or "")[:300]
 
             if status_code == 404:
                 logger.error(
                     "Massive request 404",
+                    method=method,
                     url=url,
                     symbol=symbol,
                     status_code=status_code,
@@ -71,6 +72,7 @@ class MassiveClient:
             if status_code in retryable_status and attempt < max_attempts - 1:
                 logger.warning(
                     "Massive request retryable",
+                    method=method,
                     url=url,
                     symbol=symbol,
                     status_code=status_code,
@@ -85,6 +87,7 @@ class MassiveClient:
             if status_code != 200:
                 logger.error(
                     "Massive request non-200",
+                    method=method,
                     url=url,
                     symbol=symbol,
                     status_code=status_code,
@@ -110,10 +113,18 @@ class MassiveClient:
         buffer = timedelta(minutes=30)
         window = step * limit + buffer
         start_at = now - window
-        path = (
-            f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/"
-            f"{start_at.isoformat()}/{now.isoformat()}"
-        )
+
+        def to_epoch_ms(dt: datetime) -> int:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt_utc = dt.astimezone(timezone.utc)
+            return int(dt_utc.timestamp() * 1000)
+
+        from_ms = to_epoch_ms(start_at)
+        to_ms = to_epoch_ms(now)
+
+        # Massive agg endpoint requires epoch milliseconds (not ISO strings) in the path
+        path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_ms}/{to_ms}"
 
         data = self._request(
             "GET",
@@ -134,8 +145,16 @@ class MassiveClient:
         return bars
 
     def _timeframe_to_range(self, timeframe: str) -> tuple[int, str, timedelta]:
-        if timeframe == "5m":
-            return 5, "minute", timedelta(minutes=5)
+        minute_map = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "60m": 60,
+        }
+        if timeframe in minute_map:
+            minutes = minute_map[timeframe]
+            return minutes, "minute", timedelta(minutes=minutes)
         if timeframe == "1d":
             return 1, "day", timedelta(days=1)
         raise ValueError(f"Unsupported timeframe: {timeframe}")
