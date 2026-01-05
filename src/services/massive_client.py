@@ -21,12 +21,28 @@ class MassiveClient:
     def __init__(self, api_key: str | None = None, timeout: float = 10.0):
         self.api_key = api_key or settings.MASSIVE_API_KEY
         self.timeout = timeout
-        self.base_url = settings.MASSIVE_API_BASE_URL or "https://api.massive.com"
+        self.provider = (settings.DATA_PROVIDER or "polygon").lower()
+        self.base_url = self._resolve_base_url()
         self.bars_path_template = settings.MASSIVE_BARS_PATH_TEMPLATE
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout, connect=timeout, read=timeout),
             headers={"Authorization": f"Bearer {self.api_key}"},
         )
+        if self.provider == "polygon" and "polygon" not in self.base_url:
+            logger.warning(
+                "provider/base_url mismatch",
+                provider=self.provider,
+                base_url=self.base_url,
+            )
+
+    def _resolve_base_url(self) -> str:
+        if settings.BASE_URL:
+            return settings.BASE_URL
+        if self.provider == "polygon":
+            return "https://api.polygon.io"
+        if self.provider == "massive":
+            return settings.MASSIVE_API_BASE_URL or "https://api.massive.com"
+        return settings.MASSIVE_API_BASE_URL or "https://api.massive.com"
 
     def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
         backoff = 1.0
@@ -60,17 +76,24 @@ class MassiveClient:
             full_url = str(response.request.url) if response.request else url
 
             if status_code == 404:
+                safe_params = dict(params or {})
+                safe_params.pop("apiKey", None)
+                safe_params.pop("apikey", None)
                 logger.warning(
                     "Massive request 404",
                     method=method,
                     path=endpoint,
                     url=full_url,
+                    params=safe_params or None,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     response_snippet=snippet,
                 )
-                raise MassiveNotFoundError(f"{method} {path} returned 404")
+                err = MassiveNotFoundError(f"{method} {path} returned 404")
+                err.request = response.request
+                err.response = response
+                raise err
 
             if status_code in retryable_status and attempt < max_attempts - 1:
                 logger.warning(
@@ -118,12 +141,17 @@ class MassiveClient:
         from_date = now.strftime("%Y-%m-%d")
         to_date = now.strftime("%Y-%m-%d")
 
-        path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+        if self.provider == "polygon":
+            path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+            params = {"adjusted": True, "sort": "desc", "limit": limit}
+        else:
+            path = self.bars_path_template.format(symbol=symbol)
+            params = {"timeframe": timeframe, "limit": limit}
 
         data = self._request(
             "GET",
             path,
-            params={"adjusted": True, "sort": "desc", "limit": limit},
+            params=params,
             symbol=symbol,
         )
         raw_bars = data.get("results", data) if isinstance(data, dict) else data
@@ -131,11 +159,11 @@ class MassiveClient:
         for bar in raw_bars or []:
             normalized_bar = dict(bar)
             normalized_bar.setdefault("t", bar.get("t") or bar.get("timestamp") or bar.get("ts"))
-            normalized_bar.setdefault("o", bar.get("o"))
-            normalized_bar.setdefault("h", bar.get("h"))
-            normalized_bar.setdefault("l", bar.get("l"))
-            normalized_bar.setdefault("c", bar.get("c"))
-            normalized_bar.setdefault("v", bar.get("v"))
+            normalized_bar.setdefault("o", bar.get("o") or bar.get("open"))
+            normalized_bar.setdefault("h", bar.get("h") or bar.get("high"))
+            normalized_bar.setdefault("l", bar.get("l") or bar.get("low"))
+            normalized_bar.setdefault("c", bar.get("c") or bar.get("close"))
+            normalized_bar.setdefault("v", bar.get("v") or bar.get("volume"))
             bars.append(normalized_bar)
         return bars
 
@@ -147,9 +175,14 @@ class MassiveClient:
         raise ValueError(f"Unsupported timeframe: {timeframe}")
 
     def get_daily_snapshot(self, symbol: str) -> Dict[str, Any]:
+        if self.provider == "polygon":
+            path = f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
+        else:
+            path = f"/markets/{symbol}/snapshot"
+
         data = self._request(
             "GET",
-            f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}",
+            path,
             symbol=symbol,
         )
 
