@@ -728,6 +728,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         log_skip_summary()
         if scanned_count > 20 and triggered_count == 0:
             top_candidates = sorted(candidate_scores, key=lambda c: c[1], reverse=True)[:10]
+            top_skip_kv = _safe_kv_summary(skip_reasons.most_common(5))
             skip_summary = [
                 {"reason": r, "count": c} for r, c in skip_reasons.most_common()
             ]
@@ -735,12 +736,18 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 {"symbol": sym, "confidence": round(score, 3), "meets_threshold": meets}
                 for sym, score, meets in top_candidates
             ]
+            top_candidates_str = ", ".join(
+                [
+                    f"{sym}:{round(score, 3)}({'Y' if meets else 'N'})"
+                    for sym, score, meets in top_candidates[:5]
+                ]
+            )
             message = (
                 "scan produced no alerts despite volume | "
                 f"scanned={scanned_count} triggered={triggered_count} "
                 f"errors={error_count} "
-                f"top_skip_reasons={json.dumps(skip_summary[:5])} "
-                f"top_candidates={json.dumps(top_candidates_render[:5])}"
+                f"top_skip={top_skip_kv} "
+                f"top_candidates={top_candidates_str}"
             )
             logger.error(
                 message,
