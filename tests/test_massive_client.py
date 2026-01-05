@@ -10,6 +10,10 @@ def test_get_bars_returns_list():
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.startswith("/v2/aggs/ticker/SPY/range/5/minute/")
+        parts = request.url.path.rstrip("/").split("/")
+        # from/to must be epoch milliseconds, not ISO strings
+        assert parts[-1].isdigit()
+        assert parts[-2].isdigit()
         return httpx.Response(200, json={"results": results})
 
     transport = httpx.MockTransport(handler)
