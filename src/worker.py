@@ -142,7 +142,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
     def log_confidence_distribution() -> None:
         if not candidate_scores:
-            logger.info("confidence distribution", candidates=0)
+            logger.info("confidence distribution | candidates=0", candidates=0)
             return
         scores = [score for _, score, _ in candidate_scores]
         min_score = min(scores)
@@ -150,8 +150,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         avg_score = sum(scores) / len(scores)
         above = sum(1 for _, score, _ in candidate_scores if score >= settings.MIN_CONFIDENCE_TO_ALERT)
         below = len(candidate_scores) - above
+        message = (
+            "confidence distribution | "
+            f"candidates={len(candidate_scores)} min={round(min_score, 3)} "
+            f"max={round(max_score, 3)} avg={round(avg_score, 3)} "
+            f"above_threshold={above} below_threshold={below} "
+            f"threshold={settings.MIN_CONFIDENCE_TO_ALERT}"
+        )
         logger.info(
-            "confidence distribution",
+            message,
             candidates=len(candidate_scores),
             min=round(min_score, 3),
             max=round(max_score, 3),
@@ -164,9 +171,12 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     def log_skip_summary() -> None:
         if not skip_reasons:
             return
+        reasons_list = [
+            {"reason": reason, "count": count} for reason, count in skip_reasons.most_common()
+        ]
         logger.info(
-            "skip reasons summary",
-            reasons=[{"reason": reason, "count": count} for reason, count in skip_reasons.most_common()],
+            f"skip reasons summary | {json.dumps(reasons_list)}",
+            reasons=reasons_list,
         )
 
     if debug_symbol:
@@ -382,8 +392,33 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             symbol=symbol,
                             duration_ms=int((time.perf_counter() - daily_start) * 1000),
                         )
-                    if daily is None:
-                        logger.info("snapshot missing", symbol=symbol)
+                    if not daily or (
+                        isinstance(daily, dict)
+                        and daily.get("avg_daily_volume") is None
+                        and daily.get("volume") is None
+                    ):
+                        fallback_bars_count = min(len(bars), 78) if bars else 0
+                        fallback_bars_count = min(fallback_bars_count or len(bars), 100)
+                        bars_raw_tail = bars[-fallback_bars_count:]
+                        bars_total_volume = sum(
+                            (bar.get("v") or bar.get("volume") or 0) for bar in bars_raw_tail
+                        )
+                        est_avg_daily_volume = max(bars_total_volume, 1) * 3
+                        daily = {
+                            "avg_daily_volume": est_avg_daily_volume,
+                            "volume": bars_total_volume,
+                            "iv_percentile": None,
+                            "raw": {"fallback": True},
+                        }
+                        logger.warning(
+                            "daily snapshot fallback | "
+                            f"symbol={symbol} est_avg_daily_volume={est_avg_daily_volume} "
+                            f"bars_volume={bars_total_volume} bars_used={fallback_bars_count}",
+                            symbol=symbol,
+                            est_avg_daily_volume=est_avg_daily_volume,
+                            bars_volume=bars_total_volume,
+                            bars_used=fallback_bars_count,
+                        )
 
                     trace = DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
                     idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
@@ -673,15 +708,27 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         log_skip_summary()
         if scanned_count > 20 and triggered_count == 0:
             top_candidates = sorted(candidate_scores, key=lambda c: c[1], reverse=True)[:10]
+            skip_summary = [
+                {"reason": r, "count": c} for r, c in skip_reasons.most_common()
+            ]
+            top_candidates_render = [
+                {"symbol": sym, "confidence": round(score, 3), "meets_threshold": meets}
+                for sym, score, meets in top_candidates
+            ]
+            message = (
+                "scan produced no alerts despite volume | "
+                f"scanned={scanned_count} triggered={triggered_count} "
+                f"errors={error_count} "
+                f"top_skip_reasons={json.dumps(skip_summary[:5])} "
+                f"top_candidates={json.dumps(top_candidates_render[:5])}"
+            )
             logger.error(
-                "scan produced no alerts despite volume",
+                message,
                 scanned=scanned_count,
                 triggered=triggered_count,
-                top_candidates=[
-                    {"symbol": sym, "confidence": round(score, 3), "meets_threshold": meets}
-                    for sym, score, meets in top_candidates
-                ],
-                skip_reasons=[{"reason": r, "count": c} for r, c in skip_reasons.most_common()],
+                errors=error_count,
+                top_candidates=top_candidates_render,
+                skip_reasons=skip_summary,
             )
         if debug_symbol:
             logger.info(

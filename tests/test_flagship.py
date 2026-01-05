@@ -64,12 +64,24 @@ def test_flagship_handles_missing_snapshot():
     strat = FlagshipStrategy()
     start = datetime(2024, 1, 1, 12, 30)
     bars = build_bars(start, 36, 100, rng=0.05, vol=100000)
+    for i in range(10):
+        bars[i]['high'] = 101
+        bars[i]['low'] = 99
+    for i in range(-12, 0):
+        bars[i]['high'] = 100.2
+        bars[i]['low'] = 100.0
+        bars[i]['close'] = 100.15
+    for i in range(-24, -12):
+        bars[i]['volume'] = 150000
+    bars[-1]['close'] = 100.7
+    bars[-1]['high'] = 100.8
+    bars[-1]['volume'] = 200000
     market = build_bars(start, 36, 400, rng=0.0, vol=150000)
 
     idea, trace = strat.evaluate("TEST", bars, None, market)
 
-    assert idea is None
-    assert trace.skip_reason == "missing_daily_snapshot"
+    assert trace.skip_reason != "missing_daily_snapshot"
+    assert idea is not None
 
 
 def test_flagship_window_override_allows(monkeypatch: pytest.MonkeyPatch):
