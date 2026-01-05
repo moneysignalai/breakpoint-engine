@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
     DEBUG_MODE: bool = False
+    DEBUG_SYMBOL: str | None = None
     TEST_ALERT_ON_START: bool = False
     SCAN_INTERVAL_SECONDS: int = 60
     UNIVERSE: str = "SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO"
