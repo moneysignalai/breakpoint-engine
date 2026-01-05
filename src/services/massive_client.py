@@ -30,7 +30,7 @@ class MassiveClient:
 
     def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
         backoff = 1.0
-        url = f"{self.base_url}{path}"
+        url = path if path.startswith("http") else f"{self.base_url}{path}"
         retryable_status = {429, 500, 502, 503, 504}
         max_attempts = 3
         for attempt in range(max_attempts):
@@ -174,17 +174,69 @@ class MassiveClient:
         return self._request("GET", f"/markets/{symbol}/quote", symbol=symbol)
 
     def get_option_expirations(self, symbol: str) -> List[str]:
-        data = self._request("GET", f"/options/{symbol}/expirations", symbol=symbol)
-        return data.get("expirations", data)
+        path = "/v3/reference/options/contracts"
+        params: Dict[str, Any] = {
+            "underlying_ticker": symbol,
+            "expired": "false",
+            "limit": 1000,
+            "sort": "expiration_date",
+        }
+
+        expirations: set[str] = set()
+        next_path: str | None = path
+        next_params: Dict[str, Any] | None = params
+
+        while next_path:
+            data = self._request("GET", next_path, params=next_params, symbol=symbol)
+            for contract in data.get("results", []) or []:
+                exp = contract.get("expiration_date")
+                if exp:
+                    expirations.add(exp)
+
+            next_url = data.get("next_url") if isinstance(data, dict) else None
+            if next_url:
+                next_path = next_url.replace(self.base_url, "")
+                next_params = None
+            else:
+                next_path = None
+
+        return sorted(expirations)
 
     def get_option_chain(self, symbol: str, expiration: str) -> List[Dict[str, Any]]:
-        data = self._request(
-            "GET",
-            f"/options/{symbol}/chain",
-            params={"expiration": expiration},
-            symbol=symbol,
-        )
-        return data.get("contracts", data)
+        path = "/v3/reference/options/contracts"
+        params: Dict[str, Any] = {
+            "underlying_ticker": symbol,
+            "expired": "false",
+            "expiration_date": expiration,
+            "limit": 1000,
+            "sort": "strike_price",
+        }
+
+        contracts: List[Dict[str, Any]] = []
+        next_path: str | None = path
+        next_params: Dict[str, Any] | None = params
+
+        while next_path:
+            data = self._request("GET", next_path, params=next_params, symbol=symbol)
+            for contract in data.get("results", []) or []:
+                contracts.append(
+                    {
+                        "ticker": contract.get("ticker") or contract.get("contract_symbol"),
+                        "contract_symbol": contract.get("ticker") or contract.get("contract_symbol"),
+                        "strike_price": contract.get("strike_price"),
+                        "expiration_date": contract.get("expiration_date"),
+                        "contract_type": contract.get("contract_type"),
+                    }
+                )
+
+            next_url = data.get("next_url") if isinstance(data, dict) else None
+            if next_url:
+                next_path = next_url.replace(self.base_url, "")
+                next_params = None
+            else:
+                next_path = None
+
+        return contracts
 
     def close(self) -> None:
         self.client.close()
