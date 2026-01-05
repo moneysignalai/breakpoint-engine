@@ -81,6 +81,13 @@ class FlagshipStrategy:
         self.settings = get_settings()
         self.tz = ZoneInfo(tz or self.settings.TIMEZONE)
 
+    def _estimate_avg_volume_from_bars(self, bars: List[Bar]) -> float:
+        if not bars:
+            return 0.0
+        sample = bars[-min(len(bars), self.settings.BOX_BARS * 3):]
+        total_volume = sum(b.volume for b in sample)
+        return max(total_volume, 0.0) * 3
+
     def market_bias(self, market_bars: List[Dict[str, Any]]) -> Tuple[str | None, bool]:
         bars = _to_bars(market_bars)
         closes = [b.close for b in bars]
@@ -129,23 +136,27 @@ class FlagshipStrategy:
         if len(bars_raw) < settings.BOX_BARS * 3:
             return skip("insufficient_bars", {"bar_count": len(bars_raw)})
 
-        daily = daily or {}
-        if not daily or (daily.get("avg_daily_volume") is None and daily.get("volume") is None):
-            return skip(
-                "missing_daily_snapshot",
-                {
-                    "has_daily": bool(daily),
-                    "avg_daily_volume": daily.get("avg_daily_volume"),
-                    "volume": daily.get("volume"),
-                },
-            )
         bars = _to_bars(bars_raw)
         closes = [b.close for b in bars]
         highs = [b.high for b in bars]
         lows = [b.low for b in bars]
 
         last_close = closes[-1]
-        avg_vol = daily.get('avg_daily_volume') or daily.get('volume') or 0
+        daily = daily or {}
+        est_avg_volume = self._estimate_avg_volume_from_bars(bars)
+        missing_daily = daily.get("avg_daily_volume") is None and daily.get("volume") is None
+        trace.record_gate(
+            "missing_daily_snapshot",
+            passed=True,
+            details={
+                "has_daily": bool(daily),
+                "avg_daily_volume": daily.get("avg_daily_volume"),
+                "volume": daily.get("volume"),
+                "estimated_avg_volume": est_avg_volume,
+                "missing_daily": missing_daily,
+            },
+        )
+        avg_vol = daily.get('avg_daily_volume') or daily.get('volume') or est_avg_volume
         trace.add_inputs({
             "last_close": last_close,
             "avg_volume": avg_vol,
@@ -159,12 +170,31 @@ class FlagshipStrategy:
             return skip("price_below_min", {"last_close": last_close, "min_price": settings.MIN_PRICE})
         if last_close > settings.MAX_PRICE:
             return skip("price_above_max", {"last_close": last_close, "max_price": settings.MAX_PRICE})
-        if avg_vol < settings.MIN_AVG_DAILY_VOLUME:
+        rth_start = time(9, 30)
+        rth_end = time(16, 0)
+        now_label = "RTH" if rth_start <= bars[-1].ts.time() <= rth_end else "AH"
+        min_required_volume = (
+            settings.MIN_AVG_DAILY_VOLUME
+            if now_label == "RTH"
+            else settings.MIN_AVG_DAILY_VOLUME * 0.25
+        )
+        trace.add_computed("min_avg_volume", min_required_volume)
+        if avg_vol <= 0:
+            return skip(
+                "avg_volume_unavailable",
+                {
+                    "avg_volume": avg_vol,
+                    "estimated_avg_volume": est_avg_volume,
+                    "has_daily": bool(daily),
+                },
+            )
+        if avg_vol < min_required_volume:
             return skip(
                 "avg_daily_volume_below_threshold",
                 {
                     "avg_volume": avg_vol,
-                    "min_volume": settings.MIN_AVG_DAILY_VOLUME,
+                    "min_volume": min_required_volume,
+                    "window_label": now_label,
                 },
             )
 
