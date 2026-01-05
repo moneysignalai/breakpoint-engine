@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     MASSIVE_API_KEY: str
     DATA_PROVIDER: str = "polygon"
     BASE_URL: str | None = None
-    MASSIVE_API_BASE_URL: str = "https://api.massive.com"
+    MASSIVE_API_BASE_URL: str = Field(
+        default="https://api.polygon.io",
+        validation_alias=AliasChoices("MASSIVE_API_BASE_URL", "MASSIVE_BASE_URL"),
+    )
     DATABASE_URL: str
     TELEGRAM_ENABLED: bool = Field(default=False)
     TELEGRAM_BOT_TOKEN: str | None = None

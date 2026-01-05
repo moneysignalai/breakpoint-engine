@@ -115,7 +115,8 @@ Create a `.env` with at least:
 ```
 MASSIVE_API_KEY=your_api_key
 DATA_PROVIDER=polygon
-BASE_URL=https://api.polygon.io
+MASSIVE_API_BASE_URL=https://api.polygon.io
+# MASSIVE_BASE_URL is also supported as a fallback alias
 DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=optional_bot_token
@@ -146,7 +147,7 @@ python -m src.worker
 - `render.yaml` defines a **web** service (`uvicorn src.main:app`) and a **worker** service (`python -m src.worker`).
 - Both services run migrations on boot: `alembic upgrade head`.
 - PostgreSQL is provisioned as `breakpoint-db`; `DATABASE_URL` is injected from the Render database connection string.
-- Env vars such as `MASSIVE_API_KEY`, `TELEGRAM_*`, `TIMEZONE`, `RTH_ONLY`, `SCAN_INTERVAL_SECONDS`, `MIN_CONFIDENCE_TO_ALERT`, and `UNIVERSE` map directly to `src/config.py`.
+- Env vars such as `MASSIVE_API_KEY`, `MASSIVE_API_BASE_URL=https://api.polygon.io`, `TELEGRAM_*`, `TIMEZONE`, `RTH_ONLY`, `SCAN_INTERVAL_SECONDS`, `MIN_CONFIDENCE_TO_ALERT`, and `UNIVERSE` map directly to `src/config.py`. `MASSIVE_BASE_URL` remains a backward-compatible alias if operators prefer the older name.
 
 ## Configuration
 All settings are defined in `src/config.py` (Pydantic). Key variables:
@@ -168,8 +169,8 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `ENTRY_BUFFER_PCT`, `STOP_BUFFER_PCT` – execution buffers for entries and stops.
 
 ### Provider/Base URL guidance
-- Polygon-style endpoints (`/v2/aggs`, `/v2/snapshot`, `/v3/reference/options/contracts`) require `DATA_PROVIDER=polygon` and typically `BASE_URL=https://api.polygon.io`.
-- Massive endpoints should use `DATA_PROVIDER=massive` plus the Massive base URL and bars path template if custom.
+- Polygon-style endpoints (`/v2/aggs`, `/v2/snapshot`, `/v3/reference/options/contracts`) require `DATA_PROVIDER=polygon` and typically `MASSIVE_API_BASE_URL=https://api.polygon.io` (defaults to this if unset). Operators who previously set `MASSIVE_BASE_URL` are still supported as a backward-compatible alias.
+- Massive endpoints should use `DATA_PROVIDER=massive` plus the Massive base URL and bars path template if custom. You can always override with `BASE_URL` for a one-off test.
 - If you see 404s in logs, confirm the provider matches the base URL; logs now include the full request URL and params to debug misconfiguration.
 
 ## Operational Logging
@@ -178,6 +179,13 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - **scan symbol error** – single-line summaries per symbol with stage (`bars`, `options_expirations`, `alert_send`, etc.) and the status/exception reason to quickly isolate failing calls.
 - **alert send result** – reports Telegram delivery outcome with status and reason while omitting secrets.
 - A dedicated warning surfaces if the Massive bars endpoint returns multiple 404s in a scan to hint at route/template misconfiguration.
+
+## Troubleshooting
+- Massive/Polygon HTTP failures now log the method, URL, params, status, and response snippet with the code `massive_http_error`, for example:
+  - `massive_http_error | method=GET url=https://api.polygon.io/v2/aggs/ticker/SPY/range/5/minute/... status_code=404 response_snippet=...`
+- Strategy skips include a clear reason plus key metrics:
+  - `strategy skipped | symbol=SPY strategy_name=FlagshipStrategy skip_reason=missing_daily_snapshot avg_volume=None last_price=514.2`
+- Enable `DEBUG_ENDPOINTS_ENABLED=true` on the web service to use `GET /debug/massive/health?symbol=SPY` for a live probe of the resolved base URL, bar count, and daily snapshot values without sending Telegram alerts.
 
 ## Repo Layout
 ```

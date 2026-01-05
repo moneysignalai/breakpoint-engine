@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 import time
 from typing import Any, Dict, List
@@ -17,12 +18,22 @@ class MassiveNotFoundError(Exception):
     """Raised when Massive returns a 404 for a given resource."""
 
 
+class MassiveHTTPError(Exception):
+    """Raised when Massive returns a non-200 response."""
+
+    def __init__(self, message: str, *, status_code: int, url: str, response: httpx.Response | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.url = url
+        self.response = response
+
+
 class MassiveClient:
     def __init__(self, api_key: str | None = None, timeout: float = 10.0):
         self.api_key = api_key or settings.MASSIVE_API_KEY
         self.timeout = timeout
         self.provider = (settings.DATA_PROVIDER or "polygon").lower()
-        self.base_url = self._resolve_base_url()
+        self.base_url, self.base_url_source = self._resolve_base_url()
         self.bars_path_template = settings.MASSIVE_BARS_PATH_TEMPLATE
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout, connect=timeout, read=timeout),
@@ -35,14 +46,25 @@ class MassiveClient:
                 base_url=self.base_url,
             )
 
-    def _resolve_base_url(self) -> str:
+    def _resolve_base_url(self) -> tuple[str, str]:
+        env_api_base = os.getenv("MASSIVE_API_BASE_URL")
+        env_alias_base = os.getenv("MASSIVE_BASE_URL")
+
         if settings.BASE_URL:
-            return settings.BASE_URL
+            return settings.BASE_URL, "BASE_URL"
         if self.provider == "polygon":
-            return "https://api.polygon.io"
+            if env_api_base:
+                return env_api_base, "MASSIVE_API_BASE_URL"
+            if env_alias_base:
+                return env_alias_base, "MASSIVE_BASE_URL"
+            return settings.MASSIVE_API_BASE_URL or "https://api.polygon.io", "default"
         if self.provider == "massive":
-            return settings.MASSIVE_API_BASE_URL or "https://api.massive.com"
-        return settings.MASSIVE_API_BASE_URL or "https://api.massive.com"
+            if env_api_base:
+                return env_api_base, "MASSIVE_API_BASE_URL"
+            if env_alias_base:
+                return env_alias_base, "MASSIVE_BASE_URL"
+            return settings.MASSIVE_API_BASE_URL or "https://api.massive.com", "default"
+        return settings.MASSIVE_API_BASE_URL or "https://api.polygon.io", "default"
 
     def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
         backoff = 1.0
@@ -72,7 +94,7 @@ class MassiveClient:
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
-            snippet = (response.text or "")[:300]
+            snippet = (response.text or "")[:200]
             full_url = str(response.request.url) if response.request else url
 
             if status_code == 404:
@@ -112,17 +134,27 @@ class MassiveClient:
                 continue
 
             if status_code != 200:
-                logger.warning(
-                    "Massive request non-200",
+                safe_params = dict(params or {})
+                safe_params.pop("apiKey", None)
+                safe_params.pop("apikey", None)
+                safe_params.pop("api_key", None)
+                logger.error(
+                    "massive_http_error",
+                    error_code="massive_http_error",
                     method=method,
-                    path=endpoint,
                     url=full_url,
+                    params=safe_params or None,
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     response_snippet=snippet,
                 )
-                response.raise_for_status()
+                raise MassiveHTTPError(
+                    f"{status_code} from {method} {full_url}",
+                    status_code=status_code,
+                    url=full_url,
+                    response=response,
+                )
 
             logger.debug(
                 "Massive request ok",
