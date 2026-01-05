@@ -314,13 +314,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             except (httpx.HTTPStatusError, httpx.RequestError) as exc:
                 error_count += 1
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                endpoint = extract_endpoint(exc)
                 logger.warning(
-                    "symbol scan failed",
+                    f"symbol scan failed | stage=market_bars status={status_code} endpoint={endpoint}",
                     symbol=market_symbol,
                     stage="market_bars",
                     exception=exc.__class__.__name__,
                     message=str(exc),
                     status_code=status_code,
+                    endpoint=endpoint,
                 )
                 market_bars = []
             except Exception as exc:  # noqa: BLE001
@@ -343,23 +345,26 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 logger.exception("market bars fetch failed", symbol=market_symbol)
                 market_bars = []
 
-            def record_symbol_error(
-                stage: str, exc: Exception, *, endpoint: str | None = None
-            ) -> None:
-                nonlocal bars_404_count, error_count
-                error_count += 1
-                status_code = getattr(getattr(exc, "response", None), "status_code", None)
-                logger.warning(
-                    "symbol scan failed",
-                    symbol=symbol,
-                    stage=stage,
-                    exception=exc.__class__.__name__,
-                    message=str(exc),
-                    status_code=status_code,
-                    endpoint=endpoint,
-                )
-                if isinstance(exc, MassiveNotFoundError) and stage == "bars":
-                    bars_404_count += 1
+        def record_symbol_error(
+            stage: str, exc: Exception, *, endpoint: str | None = None
+        ) -> None:
+            nonlocal bars_404_count, error_count
+            error_count += 1
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning(
+                (
+                    f"symbol scan failed | stage={stage} status={status_code}"
+                    f" endpoint={endpoint}"
+                ),
+                symbol=symbol,
+                stage=stage,
+                exception=exc.__class__.__name__,
+                message=str(exc),
+                status_code=status_code,
+                endpoint=endpoint,
+            )
+            if isinstance(exc, MassiveNotFoundError) and stage == "bars":
+                bars_404_count += 1
 
             for symbol in universe:
                 scanned_count += 1
@@ -447,7 +452,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         skip_reason = trace.skip_reason or "unknown"
                         skip_reasons[skip_reason] += 1
                         logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
-                            "strategy skipped",
+                            f"strategy skipped | reason={skip_reason}",
                             reason=skip_reason,
                             gates=trace.failed_gates(),
                             inputs=trace.inputs,
@@ -560,7 +565,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         if skip_logs_emitted < skip_log_limit:
                             skip_logs_emitted += 1
                             logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
-                                "strategy skipped",
+                                "strategy skipped | reason=confidence_below_min",
                                 reason="confidence_below_min",
                                 gates=trace.failed_gates(),
                                 inputs=trace.inputs,
@@ -728,7 +733,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         log_skip_summary()
         if scanned_count > 20 and triggered_count == 0:
             top_candidates = sorted(candidate_scores, key=lambda c: c[1], reverse=True)[:10]
-            top_skip_kv = _safe_kv_summary(skip_reasons.most_common(5))
+            top_skip_kv = ", ".join(
+                [f"{reason}={count}" for reason, count in skip_reasons.most_common(5)]
+            )
             skip_summary = [
                 {"reason": r, "count": c} for r, c in skip_reasons.most_common()
             ]
@@ -738,8 +745,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             ]
             top_candidates_str = ", ".join(
                 [
-                    f"{sym}:{round(score, 3)}({'Y' if meets else 'N'})"
-                    for sym, score, meets in top_candidates[:5]
+                    f"{candidate['symbol']}:{candidate['confidence']}("
+                    f"{'Y' if candidate['meets_threshold'] else 'N'})"
+                    for candidate in top_candidates_render[:5]
                 ]
             )
             message = (
