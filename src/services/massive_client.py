@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import httpx
 from loguru import logger
@@ -19,7 +21,7 @@ class MassiveClient:
     def __init__(self, api_key: str | None = None, timeout: float = 10.0):
         self.api_key = api_key or settings.MASSIVE_API_KEY
         self.timeout = timeout
-        self.base_url = "https://api.massive.app"
+        self.base_url = settings.MASSIVE_API_BASE_URL or "https://api.massive.com"
         self.bars_path_template = settings.MASSIVE_BARS_PATH_TEMPLATE
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout, connect=timeout, read=timeout),
@@ -102,32 +104,41 @@ class MassiveClient:
         raise RuntimeError("Unreachable")
 
     def get_bars(self, symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
-        try:
-            path = self.bars_path_template.format(symbol=symbol)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Invalid MASSIVE_BARS_PATH_TEMPLATE",
-                template=self.bars_path_template,
-                symbol=symbol,
-                error=str(exc),
-            )
-            raise ValueError("Invalid MASSIVE_BARS_PATH_TEMPLATE") from exc
-
-        if not path.startswith("/"):
-            logger.error(
-                "MASSIVE_BARS_PATH_TEMPLATE must start with '/'",
-                template=self.bars_path_template,
-                symbol=symbol,
-            )
-            raise ValueError("MASSIVE_BARS_PATH_TEMPLATE must start with '/'")
+        multiplier, timespan, step = self._timeframe_to_range(timeframe)
+        ny_tz = ZoneInfo("America/New_York")
+        now = datetime.now(ny_tz)
+        buffer = timedelta(minutes=30)
+        window = step * limit + buffer
+        start_at = now - window
+        path = (
+            f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/"
+            f"{start_at.isoformat()}/{now.isoformat()}"
+        )
 
         data = self._request(
             "GET",
             path,
-            params={"timeframe": timeframe, "limit": limit},
             symbol=symbol,
         )
-        return data.get("bars", data)
+        raw_bars = data.get("results", data) if isinstance(data, dict) else data
+        bars: List[Dict[str, Any]] = []
+        for bar in raw_bars or []:
+            normalized_bar = dict(bar)
+            normalized_bar.setdefault("t", bar.get("t") or bar.get("timestamp") or bar.get("ts"))
+            normalized_bar.setdefault("o", bar.get("o"))
+            normalized_bar.setdefault("h", bar.get("h"))
+            normalized_bar.setdefault("l", bar.get("l"))
+            normalized_bar.setdefault("c", bar.get("c"))
+            normalized_bar.setdefault("v", bar.get("v"))
+            bars.append(normalized_bar)
+        return bars
+
+    def _timeframe_to_range(self, timeframe: str) -> tuple[int, str, timedelta]:
+        if timeframe == "5m":
+            return 5, "minute", timedelta(minutes=5)
+        if timeframe == "1d":
+            return 1, "day", timedelta(days=1)
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
 
     def get_daily_snapshot(self, symbol: str) -> Dict[str, Any]:
         data = self._request(
