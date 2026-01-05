@@ -114,6 +114,8 @@ flowchart LR
 Create a `.env` with at least:
 ```
 MASSIVE_API_KEY=your_api_key
+DATA_PROVIDER=polygon
+BASE_URL=https://api.polygon.io
 DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db
 TELEGRAM_ENABLED=false
 TELEGRAM_BOT_TOKEN=optional_bot_token
@@ -121,6 +123,8 @@ TELEGRAM_CHAT_ID=optional_chat_id
 UNIVERSE=SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO
 TIMEZONE=America/New_York
 RTH_ONLY=true
+DEBUG_MODE=false
+TEST_ALERT_ON_START=false
 SCAN_INTERVAL_SECONDS=60
 MIN_CONFIDENCE_TO_ALERT=7.5
 ```
@@ -147,9 +151,13 @@ python -m src.worker
 ## Configuration
 All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `MASSIVE_API_KEY` – credentials for the market data provider (required).
-- `MASSIVE_BARS_PATH_TEMPLATE` – override for the Massive bars endpoint path template (default `/markets/{symbol}/bars`).
+- `DATA_PROVIDER` – `polygon` (default) or `massive`. Controls default base URL selection.
+- `BASE_URL` – overrides the base URL if needed (defaults to Polygon or Massive based on provider).
+- `MASSIVE_API_BASE_URL` / `MASSIVE_BARS_PATH_TEMPLATE` – Massive-specific overrides (bars default `/markets/{symbol}/bars`).
 - `DATABASE_URL` – SQLAlchemy connection string (required).
 - `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` – delivery controls.
+- `DEBUG_MODE` – compute and log strategies but suppress Telegram sends; still logs top candidates per scan.
+- `TEST_ALERT_ON_START` – send a one-time startup Telegram confirming provider/base URL and scan settings.
 - `SCAN_INTERVAL_SECONDS` – worker cadence.
 - `UNIVERSE` – comma-separated symbols scanned each cycle.
 - `RTH_ONLY`, `SCAN_OUTSIDE_WINDOW`, `ALLOWED_WINDOWS`, `TIMEZONE` – session controls.
@@ -158,6 +166,11 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `BOX_BARS`, `BOX_MAX_RANGE_PCT`, `ATR_COMP_FACTOR`, `VOL_CONTRACTION_FACTOR`, `BREAK_BUFFER_PCT`, `MAX_EXTENSION_PCT`, `BREAK_VOL_MULT`, `VWAP_CONFIRM` – flagship setup parameters.
 - `SPREAD_PCT_MAX`, `MIN_OPT_VOLUME`, `MIN_OPT_OI`, `MIN_OPT_MID`, `IV_PCTL_MAX_FOR_AGG`, `IV_PCTL_MAX_FOR_ANY` – options eligibility thresholds.
 - `ENTRY_BUFFER_PCT`, `STOP_BUFFER_PCT` – execution buffers for entries and stops.
+
+### Provider/Base URL guidance
+- Polygon-style endpoints (`/v2/aggs`, `/v2/snapshot`, `/v3/reference/options/contracts`) require `DATA_PROVIDER=polygon` and typically `BASE_URL=https://api.polygon.io`.
+- Massive endpoints should use `DATA_PROVIDER=massive` plus the Massive base URL and bars path template if custom.
+- If you see 404s in logs, confirm the provider matches the base URL; logs now include the full request URL and params to debug misconfiguration.
 
 ## Operational Logging
 - **scan start** – includes the universe size and session window label (RTH/PM/AH) so you know the worker cadence and gating state.

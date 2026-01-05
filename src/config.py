@@ -11,11 +11,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
     MASSIVE_API_KEY: str
+    DATA_PROVIDER: str = "polygon"
+    BASE_URL: str | None = None
     MASSIVE_API_BASE_URL: str = "https://api.massive.com"
     DATABASE_URL: str
     TELEGRAM_ENABLED: bool = Field(default=False)
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
+    DEBUG_MODE: bool = False
+    TEST_ALERT_ON_START: bool = False
     SCAN_INTERVAL_SECONDS: int = 60
     UNIVERSE: str = "SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO"
     RTH_ONLY: bool = True

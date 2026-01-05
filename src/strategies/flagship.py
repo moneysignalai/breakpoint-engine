@@ -107,9 +107,23 @@ class FlagshipStrategy:
             panic = True
         return bias, panic
 
-    def evaluate(self, symbol: str, bars_raw: List[Dict[str, Any]], daily: Dict[str, Any] | None, market_bars: List[Dict[str, Any]]) -> StockIdea | None:
+    def evaluate(self, symbol: str, bars_raw: List[Dict[str, Any]], daily: Dict[str, Any] | None, market_bars: List[Dict[str, Any]]) -> Tuple[StockIdea | None, Dict[str, Any]]:
+        debug: Dict[str, Any] = {
+            "skip_reasons": [],
+            "inputs": {
+                "bar_count": len(bars_raw),
+                "timezone": str(self.tz),
+            },
+            "computed": {},
+        }
+
+        def skip(reason: str) -> Tuple[StockIdea | None, Dict[str, Any]]:
+            debug["skip_reasons"].append(reason)
+            return None, debug
+
         if len(bars_raw) < settings.BOX_BARS * 3:
-            return None
+            return skip("insufficient_bars")
+
         daily = daily or {}
         bars = _to_bars(bars_raw)
         closes = [b.close for b in bars]
@@ -118,24 +132,38 @@ class FlagshipStrategy:
 
         last_close = closes[-1]
         avg_vol = daily.get('avg_daily_volume') or daily.get('volume') or 0
-        if last_close < settings.MIN_PRICE or last_close > settings.MAX_PRICE:
-            return None
+        debug["inputs"].update({
+            "last_close": last_close,
+            "avg_volume": avg_vol,
+        })
+        if last_close < settings.MIN_PRICE:
+            return skip("price_below_min")
+        if last_close > settings.MAX_PRICE:
+            return skip("price_above_max")
         if avg_vol < settings.MIN_AVG_DAILY_VOLUME:
-            return None
+            return skip("avg_volume_below_min")
 
         now = bars[-1].ts
         if now.tzinfo is None:
             now = now.replace(tzinfo=self.tz)
         now = now.astimezone(self.tz)
+        debug["computed"]["as_of"] = now
         from src.services.market_time import parse_windows  # local import
 
         windows = parse_windows(settings.ALLOWED_WINDOWS)
-        if not any(start <= now.time() <= end for start, end in windows):
-            return None
+        if not settings.SCAN_OUTSIDE_WINDOW:
+            if not any(start <= now.time() <= end for start, end in windows):
+                return skip("outside_allowed_window")
+        else:
+            debug["computed"]["window_override"] = True
 
-        market_bias, panic = self.market_bias(market_bars)
+        if market_bars:
+            market_bias, panic = self.market_bias(market_bars)
+        else:
+            market_bias, panic = None, False
+        debug["computed"]["market_bias"] = market_bias
         if panic:
-            return None
+            return skip("market_panic")
 
         breakout_bar = bars[-1]
         box = bars[-settings.BOX_BARS - 1 : -1]
@@ -143,42 +171,78 @@ class FlagshipStrategy:
         box_high = max(b.high for b in box)
         box_low = min(b.low for b in box)
         range_pct = (box_high - box_low) / last_close
+        debug["computed"].update({
+            "box_high": box_high,
+            "box_low": box_low,
+            "range_pct": range_pct,
+        })
+        debug.update(
+            {
+                "box_high": box_high,
+                "box_low": box_low,
+                "range_pct": range_pct,
+            }
+        )
         if range_pct > settings.BOX_MAX_RANGE_PCT:
-            return None
+            return skip("box_range_too_wide")
 
         atr_series = _atr(highs, lows, closes)
         if len(atr_series) < 15:
-            return None
+            return skip("atr_insufficient_history")
         atr_current = atr_series[-1]
         atr_mean_50 = sum(atr_series[-50:]) / len(atr_series[-50:]) if len(atr_series) >= 50 else sum(atr_series) / len(atr_series)
         atr_ratio = atr_current / atr_mean_50 if atr_mean_50 else 0
+        debug["computed"]["atr_ratio"] = atr_ratio
+        debug["atr_ratio"] = atr_ratio
         if atr_ratio > settings.ATR_COMP_FACTOR:
-            return None
+            return skip("atr_ratio_too_high")
 
         avg_vol_box = sum(b.volume for b in box) / len(box)
         avg_vol_prior = sum(b.volume for b in prior_box) / len(prior_box) if prior_box else avg_vol_box
         vol_ratio = avg_vol_box / avg_vol_prior if avg_vol_prior else 1
+        debug["computed"]["vol_ratio"] = vol_ratio
+        debug["vol_ratio"] = vol_ratio
         if vol_ratio > settings.VOL_CONTRACTION_FACTOR:
-            return None
+            return skip("volume_not_contracting")
 
         closes_outside = [b for b in box if b.close > box_high or b.close < box_low]
+        debug["computed"]["closes_outside_box"] = len(closes_outside)
         if len(closes_outside) > 2:
-            return None
+            return skip("too_many_closes_outside_box")
 
         break_vol_mult = breakout_bar.volume / avg_vol_box if avg_vol_box else 0
         vwap_price = _vwap(bars)
         extension_pct = (last_close - box_high) / box_high if last_close >= box_high else (box_low - last_close) / box_low
+        breakout_pct = (last_close - box_high) / box_high if last_close >= box_high else (box_low - last_close) / box_low
+        debug["computed"].update({
+            "break_vol_mult": break_vol_mult,
+            "extension_pct": extension_pct,
+            "vwap": vwap_price,
+            "vwap_position": "Above" if last_close > vwap_price else "Below",
+            "breakout_pct": breakout_pct,
+        })
+        debug.update(
+            {
+                "break_vol_mult": break_vol_mult,
+                "extension_pct": extension_pct,
+                "market_bias": market_bias,
+            }
+        )
 
         direction = None
         if last_close >= box_high * (1 + settings.BREAK_BUFFER_PCT) and break_vol_mult >= settings.BREAK_VOL_MULT and last_close <= box_high * (1 + settings.MAX_EXTENSION_PCT):
             if not settings.VWAP_CONFIRM or last_close > vwap_price:
                 direction = 'LONG'
+            else:
+                debug["skip_reasons"].append("vwap_not_confirmed")
         if last_close <= box_low * (1 - settings.BREAK_BUFFER_PCT) and break_vol_mult >= settings.BREAK_VOL_MULT and last_close >= box_low * (1 - settings.MAX_EXTENSION_PCT):
             if not settings.VWAP_CONFIRM or last_close < vwap_price:
                 direction = 'SHORT'
+            else:
+                debug["skip_reasons"].append("vwap_not_confirmed")
 
         if not direction:
-            return None
+            return skip("no_breakout_direction")
 
         vwap_ok = (last_close > vwap_price) if direction == 'LONG' else (last_close < vwap_price)
         entry = box_high * (1 + settings.ENTRY_BUFFER_PCT) if direction == 'LONG' else box_low * (1 - settings.ENTRY_BUFFER_PCT)
@@ -187,7 +251,7 @@ class FlagshipStrategy:
         stop = min(stop_candidate, midpoint) if direction == 'LONG' else max(stop_candidate, midpoint)
         risk = abs(entry - stop)
         if risk == 0:
-            return None
+            return skip("zero_risk")
         t1 = entry + risk if direction == 'LONG' else entry - risk
         t2 = entry + 2 * risk if direction == 'LONG' else entry - 2 * risk
 
@@ -207,26 +271,24 @@ class FlagshipStrategy:
                 confidence += 0.5
         confidence = cap_score(confidence)
 
-        debug = {
-            "range_pct": range_pct,
-            "atr_ratio": atr_ratio,
-            "vol_ratio": vol_ratio,
-            "break_vol_mult": break_vol_mult,
-            "extension_pct": extension_pct,
-            "vwap_ok": vwap_ok,
-            "market_bias": market_bias,
-            "box_high": box_high,
-            "box_low": box_low,
-            "debug_reasons": [],
-        }
-        return StockIdea(
-            symbol=symbol,
-            direction=direction,
-            entry=entry,
-            stop=stop,
-            t1=t1,
-            t2=t2,
-            expected_window=expected_window,
-            confidence=confidence,
-            debug=debug,
+        debug["computed"].update(
+            {
+                "vwap_ok": vwap_ok,
+                "score": confidence,
+            }
+        )
+        debug["debug_reasons"] = []
+        return (
+            StockIdea(
+                symbol=symbol,
+                direction=direction,
+                entry=entry,
+                stop=stop,
+                t1=t1,
+                t2=t2,
+                expected_window=expected_window,
+                confidence=confidence,
+                debug=debug,
+            ),
+            debug,
         )

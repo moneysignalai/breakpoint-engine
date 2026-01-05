@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import platform
+import random
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import httpx
 from loguru import logger
@@ -31,6 +32,40 @@ logger.info(
     python_version=platform.python_version(),
 )
 
+_startup_test_alert_sent = False
+
+
+def send_startup_test_alert(client: MassiveClient, universe_count: int) -> None:
+    global _startup_test_alert_sent
+    if _startup_test_alert_sent or not settings.TEST_ALERT_ON_START:
+        return
+    _startup_test_alert_sent = True
+    text = (
+        "✅ Breakpoint worker test alert\n"
+        f"provider={settings.DATA_PROVIDER}\n"
+        f"base_url={client.base_url}\n"
+        f"scan_outside_window={settings.SCAN_OUTSIDE_WINDOW}\n"
+        f"rth_only={settings.RTH_ONLY}\n"
+        f"min_confidence={settings.MIN_CONFIDENCE_TO_ALERT}\n"
+        f"debug_mode={settings.DEBUG_MODE}\n"
+        f"universe_count={universe_count}"
+    )
+    if settings.DEBUG_MODE:
+        logger.info(
+            "startup test alert suppressed by debug mode",
+            provider=settings.DATA_PROVIDER,
+            base_url=client.base_url,
+        )
+        return
+    status_code, resp = alert_service.send_telegram_message(text)
+    logger.info(
+        "startup test alert",
+        provider=settings.DATA_PROVIDER,
+        base_url=client.base_url,
+        status_code=status_code,
+        response=resp,
+    )
+
 
 def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     client = client or MassiveClient()
@@ -50,6 +85,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     start = time.monotonic()
     tz = ZoneInfo(settings.TIMEZONE)
     now = datetime.now(tz)
+    skip_logs_emitted = 0
+    skip_log_limit = 15
+    candidate_scores: List[Tuple[str, float, bool]] = []
 
     def get_window_label() -> str:
         current_time = now.time()
@@ -298,6 +336,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     daily = None
                     try:
                         daily = client.get_daily_snapshot(symbol)
+                    except MassiveNotFoundError as exc:
+                        endpoint = extract_endpoint(exc)
+                        logger.warning(
+                            "snapshot unavailable, continuing with bars only",
+                            symbol=symbol,
+                            error=str(exc),
+                            endpoint=endpoint,
+                        )
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "snapshot unavailable, continuing with bars only",
@@ -311,9 +357,27 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             duration_ms=int((time.perf_counter() - daily_start) * 1000),
                         )
 
-                    idea = strategy.evaluate(symbol, bars, daily, market_bars)
+                    idea, debug = strategy.evaluate(symbol, bars, daily, market_bars)
                     if not idea:
-                        logger.info("strategy skipped", symbol=symbol)
+                        reasons = (debug.get("skip_reasons") or ["unknown"])
+                        should_log_skip = skip_logs_emitted < skip_log_limit or random.randint(1, 10) == 1
+                        if should_log_skip:
+                            skip_logs_emitted += 1
+                            computed = debug.get("computed", {}) if isinstance(debug, dict) else {}
+                            inputs = debug.get("inputs", {}) if isinstance(debug, dict) else {}
+                            logger.info(
+                                "strategy skipped",
+                                symbol=symbol,
+                                reasons=";".join(reasons[:3]),
+                                bar_count=inputs.get("bar_count"),
+                                close=inputs.get("last_close"),
+                                vwap=computed.get("vwap_position"),
+                                avg_volume=inputs.get("avg_volume"),
+                                box_high=computed.get("box_high"),
+                                box_low=computed.get("box_low"),
+                                breakout_pct=computed.get("breakout_pct"),
+                                score=computed.get("score"),
+                            )
                         continue
 
                     logger.info(
@@ -406,6 +470,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         candidate_count=len(option_picks),
                     )
 
+                    would_trigger = confidence >= settings.MIN_CONFIDENCE_TO_ALERT
+                    candidate_scores.append((symbol, confidence, would_trigger))
+
                     if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
                         logger.info(
                             "alert threshold not met",
@@ -463,32 +530,42 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     texts = alert_service.build_alert_texts(
                         alert_dict, option_payloads if option_payloads else None
                     )
-                    try:
-                        status_code, tg_resp = alert_service.send_telegram_message(
-                            texts["short"]
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        record_symbol_error("alert_send", exc)
+                    if settings.DEBUG_MODE:
+                        status_code, tg_resp = None, "debug-mode"
+                        sent_success = False
                         logger.info(
-                            f"alert send result | symbol={symbol} channel=telegram result=failed reason={str(exc)}"
+                            "alert suppressed by debug mode",
+                            symbol=symbol,
+                            confidence=confidence,
                         )
-                        continue
-                    sent_success = status_code == 200
-                    if status_code is None:
-                        reason = tg_resp or "no-status"
-                    elif status_code != 200:
-                        reason = f"status_code={status_code}"
+                        reason = "debug_mode"
                     else:
-                        reason = "ok"
-                    if not sent_success:
-                        record_symbol_error("alert_send", RuntimeError(reason))
-                    result_label = "sent" if sent_success else "failed"
-                    message = (
-                        f"alert send result | symbol={symbol} channel=telegram "
-                        f"result={result_label} reason={reason}"
-                    )
-                    logger.info(message)
-                    logger.debug("telegram response", symbol=symbol, response=tg_resp)
+                        try:
+                            status_code, tg_resp = alert_service.send_telegram_message(
+                                texts["short"]
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            record_symbol_error("alert_send", exc)
+                            logger.info(
+                                f"alert send result | symbol={symbol} channel=telegram result=failed reason={str(exc)}"
+                            )
+                            continue
+                        sent_success = status_code == 200
+                        if status_code is None:
+                            reason = tg_resp or "no-status"
+                        elif status_code != 200:
+                            reason = f"status_code={status_code}"
+                        else:
+                            reason = "ok"
+                        if not sent_success:
+                            record_symbol_error("alert_send", RuntimeError(reason))
+                        result_label = "sent" if sent_success else "failed"
+                        message = (
+                            f"alert send result | symbol={symbol} channel=telegram "
+                            f"result={result_label} reason={reason}"
+                        )
+                        logger.info(message)
+                        logger.debug("telegram response", symbol=symbol, response=tg_resp)
 
                     alert_row = Alert(
                         symbol=symbol,
@@ -533,6 +610,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         record_symbol_error("unexpected", exc)
                     logger.exception("scan error for symbol", symbol=symbol, error=str(exc))
                     continue
+            if candidate_scores:
+                top_candidates = sorted(candidate_scores, key=lambda c: c[1], reverse=True)[:5]
+                logger.info(
+                    "top candidates by score",
+                    candidates=[
+                        {"symbol": sym, "score": round(score, 2), "meets_threshold": meets}
+                        for sym, score, meets in top_candidates
+                    ],
+                )
             if bars_404_count > 1:
                 logger.warning(
                     "Massive bars endpoint returned 404 (check MASSIVE_BARS_PATH_TEMPLATE)"
@@ -558,6 +644,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 async def worker_loop() -> None:
     init_db()
     client = MassiveClient()
+    send_startup_test_alert(client, len(settings.universe_list()))
     while True:
         try:
             run_scan_once(client)
