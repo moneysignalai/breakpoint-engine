@@ -110,10 +110,17 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     try:
         with session_scope() as session:
             try:
+                stored_universe = settings.UNIVERSE
+                if stored_universe and len(stored_universe) > 2000:
+                    stored_universe = (
+                        f"len={len(universe)} "
+                        f"first10={','.join(universe[:10])} … last10={','.join(universe[-10:])}"
+                    )
+
                 scan_run = ScanRun(
                     started_at=started_at,
                     finished_at=None,
-                    universe=settings.UNIVERSE,
+                    universe=stored_universe,
                     symbols_scanned=[],
                 )
                 session.add(scan_run)
@@ -153,6 +160,16 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     duration_ms=int((time.perf_counter() - market_bars_start) * 1000),
                     bars=len(market_bars),
                 )
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                error_count += 1
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                logger.warning(
+                    "scan symbol error",
+                    symbol=market_symbol,
+                    reason="api_error",
+                    status_code=status_code,
+                )
+                market_bars = []
             except Exception as exc:  # noqa: BLE001
                 error_count += 1
                 if scan_reason == "ok":
@@ -210,6 +227,20 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         bars = client.get_bars(
                             symbol, timeframe="5m", limit=settings.BOX_BARS * 3
                         )
+                    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                        error_count += 1
+                        symbol_error_recorded = True
+                        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                        logger.warning(
+                            "scan symbol error",
+                            symbol=symbol,
+                            reason="api_error",
+                            status_code=status_code,
+                        )
+                        logger.debug(
+                            "scan symbol error detail", symbol=symbol, stage="bars", error=str(exc)
+                        )
+                        continue
                     except (httpx.HTTPStatusError, MassiveNotFoundError) as exc:
                         status_code = getattr(getattr(exc, "response", None), "status_code", None)
                         endpoint = extract_endpoint(exc)

@@ -11,9 +11,18 @@ def test_get_bars_returns_list():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.startswith("/v2/aggs/ticker/SPY/range/5/minute/")
         parts = request.url.path.rstrip("/").split("/")
-        # from/to must be epoch milliseconds, not ISO strings
-        assert parts[-1].isdigit()
-        assert parts[-2].isdigit()
+        assert len(parts) >= 9
+        from_date = parts[-2]
+        to_date = parts[-1]
+        assert from_date == to_date
+        assert len(from_date) == 10
+        assert len(to_date) == 10
+        assert from_date.count("-") == 2
+        assert to_date.count("-") == 2
+
+        assert request.url.params["adjusted"].lower() == "true"
+        assert request.url.params["sort"] == "desc"
+        assert request.url.params["limit"] == "36"
         return httpx.Response(200, json={"results": results})
 
     transport = httpx.MockTransport(handler)
