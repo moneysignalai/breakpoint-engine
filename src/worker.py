@@ -18,14 +18,17 @@ from src.models.option_candidate import OptionCandidate
 from src.models.scan_run import ScanRun
 from src.services import alerts as alert_service
 from src.services.db import session_scope, init_db
-from src.services.market_time import in_allowed_window
+from src.services.market_time import in_allowed_window, parse_windows
 from src.services.massive_client import MassiveClient, MassiveNotFoundError
 from src.strategies.flagship import FlagshipStrategy
 from src.strategies.option_optimizer import OptionOptimizer, OptionPick, OptionResult
+from src.utils.config_validation import validate_runtime_config
+from src.utils.decision_trace import DecisionTrace
 from src.utils import configure_logging
 
 configure_logging("worker")
 settings = get_settings()
+validate_runtime_config(settings)
 logger.info(
     "worker boot",
     settings=settings.non_secret_dict(),
@@ -107,6 +110,17 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         now_local_et=datetime.now(ZoneInfo("America/New_York")).isoformat(),
         window_label=window_label,
         scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+    )
+
+    windows = parse_windows(settings.ALLOWED_WINDOWS)
+    allowed_window = any(start <= now.time() <= end for start, end in windows)
+    logger.info(
+        "scan window decision",
+        current_utc=datetime.utcnow(),
+        current_local=now,
+        timezone=settings.TIMEZONE,
+        in_allowed_window=allowed_window,
+        window_bounds=[{"start": s.isoformat(), "end": e.isoformat()} for s, e in windows],
     )
 
     logger.info(
@@ -202,7 +216,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
             )
 
-            allowed_window = in_allowed_window(now)
+            allowed_window = allowed_window or settings.SCAN_OUTSIDE_WINDOW or in_allowed_window(now)
             if not allowed_window:
                 if db_persist_available and scan_run:
                     scan_run.finished_at = datetime.utcnow()
@@ -233,9 +247,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 error_count += 1
                 status_code = getattr(getattr(exc, "response", None), "status_code", None)
                 logger.warning(
-                    "scan symbol error",
+                    "symbol scan failed",
                     symbol=market_symbol,
-                    reason="api_error",
+                    stage="market_bars",
+                    exception=exc.__class__.__name__,
+                    message=str(exc),
                     status_code=status_code,
                 )
                 market_bars = []
@@ -263,32 +279,25 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 scanned_count += 1
                 symbol_error_recorded = False
 
-                def record_symbol_error(
-                    stage: str, exc: Exception, *, endpoint: str | None = None
-                ) -> None:
-                    nonlocal symbol_error_recorded, bars_404_count, error_count
-                    if not symbol_error_recorded:
-                        error_count += 1
-                        symbol_error_recorded = True
-                    reason = reason_from_exception(exc)
-                    logger.warning(
-                        "scan symbol error",
-                        symbol=symbol,
-                        stage=stage,
-                        reason=reason,
-                        status_code=getattr(
-                            getattr(exc, "response", None), "status_code", None
-                        ),
-                        endpoint=endpoint,
-                    )
-                    logger.debug(
-                        "scan symbol error detail",
-                        symbol=symbol,
-                        stage=stage,
-                        error=str(exc),
-                    )
-                    if isinstance(exc, MassiveNotFoundError) and stage == "bars":
-                        bars_404_count += 1
+        def record_symbol_error(
+            stage: str, exc: Exception, *, endpoint: str | None = None
+        ) -> None:
+            nonlocal symbol_error_recorded, bars_404_count, error_count
+            if not symbol_error_recorded:
+                error_count += 1
+                symbol_error_recorded = True
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            logger.warning(
+                "symbol scan failed",
+                symbol=symbol,
+                stage=stage,
+                exception=exc.__class__.__name__,
+                message=str(exc),
+                status_code=status_code,
+                endpoint=endpoint,
+            )
+            if isinstance(exc, MassiveNotFoundError) and stage == "bars":
+                bars_404_count += 1
 
                 try:
                     bars_start = time.perf_counter()
@@ -301,13 +310,12 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         symbol_error_recorded = True
                         status_code = getattr(getattr(exc, "response", None), "status_code", None)
                         logger.warning(
-                            "scan symbol error",
+                            "symbol scan failed",
                             symbol=symbol,
-                            reason="api_error",
+                            stage="bars",
+                            exception=exc.__class__.__name__,
+                            message=str(exc),
                             status_code=status_code,
-                        )
-                        logger.debug(
-                            "scan symbol error detail", symbol=symbol, stage="bars", error=str(exc)
                         )
                         continue
                     except (httpx.HTTPStatusError, MassiveNotFoundError) as exc:
@@ -357,29 +365,19 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             duration_ms=int((time.perf_counter() - daily_start) * 1000),
                         )
 
-                    idea, debug, skip_decision = strategy.evaluate(symbol, bars, daily, market_bars)
+                    trace = DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
+                    idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
                     if not idea:
-                        reasons = (debug.get("skip_reasons") or ["unknown"])
-                        skip_reason = skip_decision.reason if skip_decision else reasons[0]
+                        skip_reason = trace.skip_reason or "unknown"
                         should_log_skip = skip_logs_emitted < skip_log_limit or random.randint(1, 10) == 1
                         if should_log_skip:
                             skip_logs_emitted += 1
-                            computed = debug.get("computed", {}) if isinstance(debug, dict) else {}
-                            inputs = debug.get("inputs", {}) if isinstance(debug, dict) else {}
-                            logger.info(
+                            logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
                                 "strategy skipped",
-                                symbol=symbol,
-                                strategy_name="FlagshipStrategy",
-                                skip_reason=skip_reason,
-                                details=(skip_decision.details if skip_decision else None),
-                                bar_count=inputs.get("bar_count"),
-                                close=inputs.get("last_close"),
-                                avg_volume=inputs.get("avg_volume"),
-                                market_bias=computed.get("market_bias"),
-                                box_high=computed.get("box_high"),
-                                box_low=computed.get("box_low"),
-                                breakout_pct=computed.get("breakout_pct"),
-                                score=computed.get("score"),
+                                reason=skip_reason,
+                                gates=trace.failed_gates(),
+                                inputs=trace.inputs,
+                                computed=trace.computed,
                             )
                         continue
 
@@ -477,20 +475,25 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     candidate_scores.append((symbol, confidence, would_trigger))
 
                     if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
+                        trace.mark_skip(
+                            "confidence_below_min",
+                            {
+                                "confidence": confidence,
+                                "min_confidence": settings.MIN_CONFIDENCE_TO_ALERT,
+                            },
+                        )
                         if skip_logs_emitted < skip_log_limit:
                             skip_logs_emitted += 1
-                            logger.info(
+                            logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
                                 "strategy skipped",
-                                symbol=symbol,
-                                strategy_name="FlagshipStrategy",
-                                skip_reason="confidence_below_min",
-                                confidence=confidence,
-                                min_confidence=settings.MIN_CONFIDENCE_TO_ALERT,
-                                avg_volume=idea.debug.get("inputs", {}).get("avg_volume"),
-                                last_price=idea.debug.get("inputs", {}).get("last_close"),
+                                reason="confidence_below_min",
+                                gates=trace.failed_gates(),
+                                inputs=trace.inputs,
+                                computed=trace.computed,
                             )
                         continue
 
+                    computed = trace.computed
                     alert_dict = {
                         "symbol": symbol,
                         "direction": idea.direction,
@@ -500,15 +503,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         "stop": idea.stop,
                         "t1": idea.t1,
                         "t2": idea.t2,
-                        "box_high": idea.debug["box_high"],
-                        "box_low": idea.debug["box_low"],
-                        "range_pct": idea.debug["range_pct"],
-                        "atr_ratio": idea.debug["atr_ratio"],
-                        "vol_ratio": idea.debug["vol_ratio"],
-                        "break_vol_mult": idea.debug["break_vol_mult"],
-                        "extension_pct": idea.debug["extension_pct"],
-                        "market_bias": idea.debug.get("market_bias"),
-                        "vwap_ok": idea.debug["vwap_ok"],
+                        "box_high": computed.get("box_high"),
+                        "box_low": computed.get("box_low"),
+                        "range_pct": computed.get("range_pct"),
+                        "atr_ratio": computed.get("atr_ratio"),
+                        "vol_ratio": computed.get("vol_ratio"),
+                        "break_vol_mult": computed.get("break_vol_mult"),
+                        "extension_pct": computed.get("extension_pct"),
+                        "market_bias": computed.get("market_bias"),
+                        "vwap_ok": computed.get("vwap_ok"),
                     }
                     option_payloads = []
                     if option_picks:

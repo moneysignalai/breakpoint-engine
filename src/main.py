@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from loguru import logger
 from sqlalchemy.orm import joinedload
 
@@ -16,6 +16,9 @@ from src.models.alert import Alert
 from src.services.alerts import build_alert_texts, send_telegram_message
 from src.services.db import session_scope, init_db
 from src.services.massive_client import MassiveClient
+from src.strategies.flagship import FlagshipStrategy
+from src.utils.config_validation import validate_runtime_config
+from src.utils.decision_trace import DecisionTrace
 from src.utils import configure_logging
 from src.worker import run_scan_once
 
@@ -23,7 +26,9 @@ configure_logging("web")
 
 app = FastAPI(title="Breakout Engine")
 settings = get_settings()
+validate_runtime_config(settings)
 DEBUG_ENDPOINTS_ENABLED = os.getenv("DEBUG_ENDPOINTS_ENABLED", "false").lower() == "true"
+DEBUG_TOKEN = os.getenv("DEBUG_TOKEN")
 
 _debug_sample_alert_lock = threading.Lock()
 _last_debug_sample_alert_ts = 0.0
@@ -34,6 +39,16 @@ logger.info(
     python_version=platform.python_version(),
 )
 init_db()
+
+
+def _require_debug_token(authorization: str | None) -> None:
+    if not DEBUG_TOKEN:
+        raise HTTPException(status_code=403, detail="DEBUG_TOKEN not configured")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    token = authorization.split(" ", 1)[1]
+    if token != DEBUG_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid debug token")
 
 
 @app.get("/health")
@@ -51,6 +66,47 @@ def debug_settings() -> Dict[str, Any]:
     if not DEBUG_ENDPOINTS_ENABLED:
         raise HTTPException(status_code=404)
     return settings.non_secret_dict()
+
+
+@app.get("/debug/explain")
+def explain_symbol(
+    symbol: str,
+    strategy: str = "flagship",
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> Dict[str, Any]:
+    _require_debug_token(authorization)
+    if strategy.lower() != "flagship":
+        raise HTTPException(status_code=400, detail="Unsupported strategy")
+
+    client = MassiveClient()
+    upper_symbol = symbol.upper()
+    strategy_impl = FlagshipStrategy()
+    trace = DecisionTrace(symbol=upper_symbol, strategy="FlagshipStrategy")
+    bars: list[dict[str, Any]] = []
+    market_bars: list[dict[str, Any]] = []
+    daily: dict[str, Any] | None = None
+    try:
+        market_bars = client.get_bars("QQQ", timeframe="5m", limit=settings.BOX_BARS * 3)
+        bars = client.get_bars(upper_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
+        daily = client.get_daily_snapshot(upper_symbol)
+        idea, trace = strategy_impl.evaluate(upper_symbol, bars, daily, market_bars, trace)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc))
+    finally:
+        client.close()
+
+    gate_map = {gate.name: gate.passed for gate in trace.gates}
+    would_alert = bool(idea and idea.confidence >= settings.MIN_CONFIDENCE_TO_ALERT)
+
+    return {
+        "symbol": upper_symbol,
+        "strategy": "flagship",
+        "in_window": gate_map.get("window_gate"),
+        "bars_count": len(bars),
+        "computed_features_present": bool(trace.computed),
+        "decision_trace": trace.as_dict(),
+        "would_alert": would_alert,
+    }
 
 
 @app.get("/debug/massive/health")
@@ -146,6 +202,35 @@ def root() -> Dict[str, str]:
 def test_telegram() -> Dict[str, bool]:
     send_telegram_message("✅ Telegram test successful – Breakpoint Engine is live.")
     return {"ok": True}
+
+
+@app.get("/debug/test-alert")
+def debug_test_alert(authorization: str | None = Header(default=None, alias="Authorization")) -> Dict[str, Any]:
+    _require_debug_token(authorization)
+
+    sample_alert = {
+        "symbol": "DBG",
+        "direction": "LONG",
+        "entry": 100.25,
+        "stop": 98.75,
+        "t1": 102.5,
+        "t2": 105.0,
+        "confidence": 7.5,
+        "box_high": 100.0,
+        "box_low": 99.0,
+        "range_pct": 0.010,
+        "atr_ratio": 0.8,
+        "vol_ratio": 0.7,
+        "break_vol_mult": 1.6,
+        "extension_pct": 0.003,
+        "vwap_ok": True,
+        "market_bias": "Flat",
+        "expected_window": "same_day",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    texts = build_alert_texts(sample_alert, [])
+    status_code, response = send_telegram_message(texts.get("short", ""))
+    return {"ok": status_code == 200, "status_code": status_code, "response": response}
 
 
 @app.post("/debug/send-sample-alert")
