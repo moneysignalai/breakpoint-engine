@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
     MASSIVE_API_KEY: str
+    MASSIVE_API_BASE_URL: str = "https://api.massive.com"
     DATABASE_URL: str
     TELEGRAM_ENABLED: bool = Field(default=False)
     TELEGRAM_BOT_TOKEN: str | None = None

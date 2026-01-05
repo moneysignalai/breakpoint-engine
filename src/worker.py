@@ -7,6 +7,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List
 
+import httpx
 from loguru import logger
 
 from src.config import get_settings
@@ -172,6 +173,16 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         bars = client.get_bars(
                             symbol, timeframe="5m", limit=settings.BOX_BARS * 3
                         )
+                    except (httpx.HTTPStatusError, MassiveNotFoundError) as exc:
+                        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                        logger.error(
+                            "bars fetch failed",
+                            symbol=symbol,
+                            status_code=status_code,
+                            error=str(exc),
+                        )
+                        record_symbol_error("bars", exc)
+                        continue
                     except Exception as exc:  # noqa: BLE001
                         record_symbol_error("bars", exc)
                         continue
