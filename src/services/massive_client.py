@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import time
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
@@ -86,7 +86,7 @@ class MassiveClient:
                 continue
 
             if status_code != 200:
-                logger.error(
+                logger.warning(
                     "Massive request non-200",
                     method=method,
                     path=endpoint,
@@ -108,28 +108,18 @@ class MassiveClient:
         raise RuntimeError("Unreachable")
 
     def get_bars(self, symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
-        multiplier, timespan, step = self._timeframe_to_range(timeframe)
+        multiplier, timespan = self._timeframe_to_range(timeframe)
         ny_tz = ZoneInfo("America/New_York")
         now = datetime.now(ny_tz)
-        buffer = timedelta(minutes=30)
-        window = step * limit + buffer
-        start_at = now - window
+        from_date = now.strftime("%Y-%m-%d")
+        to_date = now.strftime("%Y-%m-%d")
 
-        def to_epoch_ms(dt: datetime) -> int:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            dt_utc = dt.astimezone(timezone.utc)
-            return int(dt_utc.timestamp() * 1000)
-
-        from_ms = to_epoch_ms(start_at)
-        to_ms = to_epoch_ms(now)
-
-        # Massive agg endpoint requires epoch milliseconds (not ISO strings) in the path
-        path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_ms}/{to_ms}"
+        path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
 
         data = self._request(
             "GET",
             path,
+            params={"adjusted": True, "sort": "desc", "limit": limit},
             symbol=symbol,
         )
         raw_bars = data.get("results", data) if isinstance(data, dict) else data
@@ -145,19 +135,11 @@ class MassiveClient:
             bars.append(normalized_bar)
         return bars
 
-    def _timeframe_to_range(self, timeframe: str) -> tuple[int, str, timedelta]:
-        minute_map = {
-            "1m": 1,
-            "5m": 5,
-            "15m": 15,
-            "30m": 30,
-            "60m": 60,
-        }
-        if timeframe in minute_map:
-            minutes = minute_map[timeframe]
-            return minutes, "minute", timedelta(minutes=minutes)
-        if timeframe == "1d":
-            return 1, "day", timedelta(days=1)
+    def _timeframe_to_range(self, timeframe: str) -> tuple[int, str]:
+        if timeframe == "1m":
+            return 1, "minute"
+        if timeframe == "5m":
+            return 5, "minute"
         raise ValueError(f"Unsupported timeframe: {timeframe}")
 
     def get_daily_snapshot(self, symbol: str) -> Dict[str, Any]:
