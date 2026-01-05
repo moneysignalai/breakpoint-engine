@@ -19,7 +19,7 @@ from src.services.db import session_scope, init_db
 from src.services.market_time import in_allowed_window
 from src.services.massive_client import MassiveClient, MassiveNotFoundError
 from src.strategies.flagship import FlagshipStrategy
-from src.strategies.option_optimizer import OptionOptimizer, OptionPick
+from src.strategies.option_optimizer import OptionOptimizer, OptionPick, OptionResult
 from src.utils import configure_logging
 
 configure_logging("worker")
@@ -63,7 +63,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     window_label = get_window_label()
 
     logger.info(
-        f"scan start | universe_count={universe_count} window={window_label}"
+        f"scan start | universe_count={universe_count} window={window_label} "
+        f"scan_outside_window={settings.SCAN_OUTSIDE_WINDOW}"
     )
     result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
     scan_run: ScanRun | None = None
@@ -77,16 +78,22 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             return str(status_code)
         return exc.__class__.__name__
 
+    def extract_endpoint(exc: Exception) -> str | None:
+        request = getattr(exc, "request", None)
+        if request and getattr(request, "url", None):
+            try:
+                raw_path = request.url.raw_path
+                if raw_path:
+                    return raw_path.decode()
+            except Exception:  # noqa: BLE001
+                return str(request.url)
+        return None
+
     def log_scan_end() -> None:
         duration_ms = int((time.monotonic() - start) * 1000)
         effective_reason = scan_reason
         if scanned_count == 0 and error_count > 0 and scan_reason == "ok":
             effective_reason = "api_error"
-
-        if triggered_count == 0:
-            logger.info(
-                f"scan result | no alerts | scanned={scanned_count} reason={effective_reason}"
-            )
 
         scan_end_message = (
             f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
@@ -115,7 +122,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 db_persist_available = False
                 scan_reason = "db_error"
                 logger.exception(
-                    f"scan failed | reason=db_error error={str(exc)}"
+                    "scan run persist failed", error=str(exc)
                 )
                 session.rollback()
 
@@ -153,22 +160,26 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 if db_persist_available and scan_run:
                     scan_run.finished_at = datetime.utcnow()
                     scan_run.notes = "Market bars fetch failed"
-                logger.warning(
-                    "scan symbol error",
+                endpoint = extract_endpoint(exc)
+                logger.error(
+                    "market bars fetch failed",
                     symbol=market_symbol,
                     stage="bars",
                     reason=reason_from_exception(exc),
+                    endpoint=endpoint,
                 )
                 if isinstance(exc, MassiveNotFoundError):
                     bars_404_count += 1
                 logger.exception("market bars fetch failed", symbol=market_symbol)
-                return result
+                market_bars = []
 
             for symbol in universe:
                 scanned_count += 1
                 symbol_error_recorded = False
 
-                def record_symbol_error(stage: str, exc: Exception) -> None:
+                def record_symbol_error(
+                    stage: str, exc: Exception, *, endpoint: str | None = None
+                ) -> None:
                     nonlocal symbol_error_recorded, bars_404_count, error_count
                     if not symbol_error_recorded:
                         error_count += 1
@@ -179,6 +190,10 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         symbol=symbol,
                         stage=stage,
                         reason=reason,
+                        status_code=getattr(
+                            getattr(exc, "response", None), "status_code", None
+                        ),
+                        endpoint=endpoint,
                     )
                     logger.debug(
                         "scan symbol error detail",
@@ -197,13 +212,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         )
                     except (httpx.HTTPStatusError, MassiveNotFoundError) as exc:
                         status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                        endpoint = extract_endpoint(exc)
                         logger.error(
                             "bars fetch failed",
                             symbol=symbol,
                             status_code=status_code,
+                            endpoint=endpoint,
                             error=str(exc),
                         )
-                        record_symbol_error("bars", exc)
+                        record_symbol_error("bars", exc, endpoint=endpoint)
                         continue
                     except Exception as exc:  # noqa: BLE001
                         record_symbol_error("bars", exc)
@@ -257,6 +274,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         chain_start = time.perf_counter()
                         try:
                             chain = client.get_option_chain(symbol, exp)
+                        except MassiveNotFoundError as exc:
+                            logger.warning(
+                                "options chain unavailable",
+                                symbol=symbol,
+                                expiration=exp,
+                                status_code=404,
+                                endpoint="/v3/reference/options/contracts",
+                            )
+                            return []
                         except Exception as exc:  # noqa: BLE001
                             record_symbol_error("options_chain", exc)
                             raise
@@ -284,6 +310,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             load_chain,
                             iv_percentile=iv_pct,
                         )
+                    except MassiveNotFoundError as exc:
+                        logger.warning(
+                            "options recommendation unavailable",
+                            symbol=symbol,
+                            status_code=404,
+                            endpoint="/v3/reference/options/contracts",
+                        )
+                        opt_result = OptionResult(stock_only=True, reason=str(exc), candidates=[])
                     except Exception as exc:  # noqa: BLE001
                         record_symbol_error("optimizer", exc)
                         continue
@@ -383,10 +417,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         record_symbol_error("alert_send", RuntimeError(reason))
                     result_label = "sent" if sent_success else "failed"
                     message = (
-                        f"alert send result | symbol={symbol} channel=telegram result={result_label}"
+                        f"alert send result | symbol={symbol} channel=telegram "
+                        f"result={result_label} reason={reason}"
                     )
-                    if not sent_success:
-                        message += f" reason={reason}"
                     logger.info(message)
                     logger.debug("telegram response", symbol=symbol, response=tg_resp)
 
