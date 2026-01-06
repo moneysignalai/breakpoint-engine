@@ -1,6 +1,6 @@
-import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.config import get_settings
-from src.strategies.flagship import FlagshipStrategy
+from src.strategies.flagship import FlagshipStrategy, _to_bars
 
 
 def build_bars(start: datetime, count: int, base: float, rng: float = 0.2, vol: int = 100000):
@@ -118,3 +118,28 @@ def test_flagship_returns_skip_reasons():
 
     assert idea is None
     assert trace.skip_reason == "insufficient_bars"
+
+
+def test_to_bars_supports_polygon_and_massive_schemas():
+    polygon_bar = {
+        "o": 1,
+        "h": 2,
+        "l": 0.5,
+        "c": 1.5,
+        "v": 1000,
+        "t": 1_700_000_000_000,
+    }
+    massive_bar = {
+        "open": 1,
+        "high": 2,
+        "low": 0.5,
+        "close": 1.5,
+        "volume": 1000,
+        "ts": "2026-01-05T15:30:00Z",
+    }
+
+    bars = _to_bars([polygon_bar, massive_bar], symbol="TEST")
+
+    assert len(bars) == 2
+    assert bars[0].open == pytest.approx(1)
+    assert bars[1].close == pytest.approx(1.5)

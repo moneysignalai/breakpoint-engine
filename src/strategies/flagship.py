@@ -5,6 +5,8 @@ from datetime import datetime, time
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
+from loguru import logger
+
 from src.config import get_settings
 from src.utils.decision_trace import DecisionTrace
 from src.utils.scoring import cap_score
@@ -35,13 +37,65 @@ class StockIdea:
     debug: Dict[str, Any]
 
 
-def _to_bars(raw: List[Dict[str, Any]]) -> List[Bar]:
+def _to_bars(raw: List[Dict[str, Any]], symbol: str | None = None) -> List[Bar]:
     bars: List[Bar] = []
+    tz_ny = ZoneInfo("America/New_York")
+    missing_logged = False
+
     for b in raw:
-        ts = b.get('ts') or b.get('timestamp') or b.get('time')
-        if isinstance(ts, str):
-            ts = datetime.fromisoformat(ts)
-        bars.append(Bar(ts=ts, open=float(b['open']), high=float(b['high']), low=float(b['low']), close=float(b['close']), volume=float(b['volume'])))
+        open_val = b.get("open", b.get("o"))
+        high_val = b.get("high", b.get("h"))
+        low_val = b.get("low", b.get("l"))
+        close_val = b.get("close", b.get("c"))
+        volume_val = b.get("volume", b.get("v"))
+        ts_raw = b.get("ts", b.get("t", b.get("timestamp")))
+
+        if any(val is None for val in (open_val, high_val, low_val, close_val, volume_val, ts_raw)):
+            if not missing_logged:
+                logger.debug(
+                    "bar missing required fields, skipping",
+                    symbol=symbol,
+                    bar_keys=list(b.keys()),
+                )
+                missing_logged = True
+            continue
+
+        ts: datetime | None
+        if isinstance(ts_raw, (int, float)):
+            ts = datetime.fromtimestamp(ts_raw / 1000, tz=tz_ny)
+        elif isinstance(ts_raw, str):
+            ts_clean = ts_raw.replace("Z", "+00:00") if ts_raw.endswith("Z") else ts_raw
+            try:
+                ts = datetime.fromisoformat(ts_clean)
+            except ValueError:
+                if not missing_logged:
+                    logger.debug("invalid timestamp format, skipping bar", symbol=symbol)
+                    missing_logged = True
+                continue
+        elif isinstance(ts_raw, datetime):
+            ts = ts_raw
+        else:
+            if not missing_logged:
+                logger.debug("unknown timestamp type, skipping bar", symbol=symbol)
+                missing_logged = True
+            continue
+
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=tz_ny)
+        else:
+            ts = ts.astimezone(tz_ny)
+
+        bars.append(
+            Bar(
+                ts=ts,
+                open=float(open_val),
+                high=float(high_val),
+                low=float(low_val),
+                close=float(close_val),
+                volume=float(volume_val),
+            )
+        )
+
     return bars
 
 
@@ -89,7 +143,9 @@ class FlagshipStrategy:
         return max(total_volume, 0.0) * 3
 
     def market_bias(self, market_bars: List[Dict[str, Any]]) -> Tuple[str | None, bool]:
-        bars = _to_bars(market_bars)
+        bars = _to_bars(market_bars, symbol="MARKET")
+        if not bars:
+            return None, False
         closes = [b.close for b in bars]
         vwap_price = _vwap(bars)
         ema_series = _ema(closes, span=20)
@@ -136,7 +192,12 @@ class FlagshipStrategy:
         if len(bars_raw) < settings.BOX_BARS * 3:
             return skip("insufficient_bars", {"bar_count": len(bars_raw)})
 
-        bars = _to_bars(bars_raw)
+        bars = _to_bars(bars_raw, symbol=symbol)
+        if len(bars) < settings.BOX_BARS * 3:
+            return skip(
+                "invalid_bars",
+                {"bar_count": len(bars), "required": settings.BOX_BARS * 3},
+            )
         closes = [b.close for b in bars]
         highs = [b.high for b in bars]
         lows = [b.low for b in bars]
