@@ -352,16 +352,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             error_count += 1
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             logger.warning(
-                (
-                    f"symbol scan failed | stage={stage} status={status_code}"
-                    f" endpoint={endpoint}"
-                ),
+                "symbol scan failed | symbol={symbol} stage={stage} status={status} "
+                "endpoint={endpoint} err={exc_type}: {message}",
                 symbol=symbol,
                 stage=stage,
-                exception=exc.__class__.__name__,
-                message=str(exc),
-                status_code=status_code,
+                status=status_code,
                 endpoint=endpoint,
+                exc_type=exc.__class__.__name__,
+                message=str(exc),
             )
             if isinstance(exc, MassiveNotFoundError) and stage == "bars":
                 bars_404_count += 1
@@ -372,9 +370,10 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 try:
                     bars_start = time.perf_counter()
                     bars: List[Dict[str, Any]] = []
+                    requested_limit = settings.BOX_BARS * 3
                     try:
                         bars = client.get_bars(
-                            symbol, timeframe="5m", limit=settings.BOX_BARS * 3
+                            symbol, timeframe="5m", limit=requested_limit
                         )
                     except (httpx.HTTPStatusError, httpx.RequestError, MassiveNotFoundError) as exc:
                         record_symbol_error("bars", exc, endpoint=extract_endpoint(exc))
@@ -382,11 +381,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     except Exception as exc:  # noqa: BLE001
                         record_symbol_error("bars", exc)
                         continue
+                    returned_count = len(bars)
                     logger.info(
-                        "bars fetched",
+                        f"bars fetched | symbol={symbol} tf=5m requested={requested_limit} returned={returned_count}",
                         symbol=symbol,
+                        requested=requested_limit,
+                        returned=returned_count,
                         duration_ms=int((time.perf_counter() - bars_start) * 1000),
-                        bars=len(bars),
                     )
                     if not bars:
                         skip_reasons["no_bars"] += 1

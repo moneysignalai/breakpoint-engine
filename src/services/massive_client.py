@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import datetime
@@ -173,32 +174,106 @@ class MassiveClient:
         now = datetime.now(ny_tz)
         from_date = now.strftime("%Y-%m-%d")
         to_date = now.strftime("%Y-%m-%d")
+        session = "rth" if settings.RTH_ONLY else "all"
+
+        def normalize_bars(raw: List[Dict[str, Any]] | Dict[str, Any]) -> List[Dict[str, Any]]:
+            raw_bars = raw.get("results", raw) if isinstance(raw, dict) else raw
+            normalized: List[Dict[str, Any]] = []
+            for bar in raw_bars or []:
+                normalized_bar = dict(bar)
+                normalized_bar.setdefault("t", bar.get("t") or bar.get("timestamp") or bar.get("ts"))
+                normalized_bar.setdefault("o", bar.get("o") or bar.get("open"))
+                normalized_bar.setdefault("h", bar.get("h") or bar.get("high"))
+                normalized_bar.setdefault("l", bar.get("l") or bar.get("low"))
+                normalized_bar.setdefault("c", bar.get("c") or bar.get("close"))
+                normalized_bar.setdefault("v", bar.get("v") or bar.get("volume"))
+                normalized.append(normalized_bar)
+            return normalized
 
         if self.provider == "polygon":
             path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
             params = {"adjusted": True, "sort": "desc", "limit": limit}
-        else:
-            path = self.bars_path_template.format(symbol=symbol)
-            params = {"timeframe": timeframe, "limit": limit}
+            data = self._request(
+                "GET",
+                path,
+                params=params,
+                symbol=symbol,
+            )
+            bars = normalize_bars(data)
+            logger.info(
+                "bars fetched | symbol={symbol} provider=polygon timeframe={tf} "
+                "requested={requested} returned={returned} from={from_date} to={to_date}",
+                symbol=symbol,
+                tf=timeframe,
+                requested=limit,
+                returned=len(bars),
+                from_date=from_date,
+                to_date=to_date,
+            )
+            return bars[-limit:]
 
-        data = self._request(
-            "GET",
-            path,
-            params=params,
-            symbol=symbol,
-        )
-        raw_bars = data.get("results", data) if isinstance(data, dict) else data
-        bars: List[Dict[str, Any]] = []
-        for bar in raw_bars or []:
-            normalized_bar = dict(bar)
-            normalized_bar.setdefault("t", bar.get("t") or bar.get("timestamp") or bar.get("ts"))
-            normalized_bar.setdefault("o", bar.get("o") or bar.get("open"))
-            normalized_bar.setdefault("h", bar.get("h") or bar.get("high"))
-            normalized_bar.setdefault("l", bar.get("l") or bar.get("low"))
-            normalized_bar.setdefault("c", bar.get("c") or bar.get("close"))
-            normalized_bar.setdefault("v", bar.get("v") or bar.get("volume"))
-            bars.append(normalized_bar)
-        return bars
+        minutes_per_day = 390 if session == "rth" else 24 * 60
+        bars_per_day = max(1, minutes_per_day // multiplier)
+        days = max(1, math.ceil(limit / bars_per_day))
+        path = self.bars_path_template.format(symbol=symbol)
+
+        attempts = [days]
+        if days < 5:
+            attempts.append(5)
+        if days < 10:
+            attempts.append(10)
+
+        last_bars: List[Dict[str, Any]] = []
+        for idx, attempt_days in enumerate(attempts):
+            try:
+                data = self._request(
+                    "GET",
+                    path,
+                    params={
+                        "timeframe": timeframe,
+                        "limit": limit,
+                        "days": attempt_days,
+                        "session": session,
+                    },
+                    symbol=symbol,
+                )
+            except Exception:
+                logger.error(
+                    "bars fetch failed", provider=self.provider, symbol=symbol, days=attempt_days
+                )
+                raise
+
+            last_bars = normalize_bars(data)
+            returned = len(last_bars)
+            logger.info(
+                "bars fetched | symbol={symbol} provider=massive timeframe={tf} "
+                "requested={requested} returned={returned} days={days} session={session}",
+                symbol=symbol,
+                tf=timeframe,
+                requested=limit,
+                returned=returned,
+                days=attempt_days,
+                session=session,
+            )
+
+            has_enough = returned >= limit
+            is_last_attempt = idx == len(attempts) - 1
+            if has_enough or is_last_attempt:
+                break
+
+            next_days = attempts[idx + 1]
+            if returned < limit:
+                logger.info(
+                    "bars refetch | symbol={symbol} requested={requested} returned={returned} "
+                    "days={current} -> days={next_days}",
+                    symbol=symbol,
+                    requested=limit,
+                    returned=returned,
+                    current=attempt_days,
+                    next_days=next_days,
+                )
+
+        return last_bars[-limit:]
 
     def _timeframe_to_range(self, timeframe: str) -> tuple[int, str]:
         if timeframe == "1m":
