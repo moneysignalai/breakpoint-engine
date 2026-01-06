@@ -101,6 +101,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     symbol_traces: List[Tuple[str, DecisionTrace]] = []
     returned_early_guard = False
     market_symbol: str | None = None
+    market_bars: List[Dict[str, Any]] = []
 
     def reason_from_exception(exc: Exception) -> str:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -128,39 +129,37 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             else:
                 scan_run.notes = note
 
-        def log_scan_end() -> None:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            effective_reason = scan_reason
-            if scanned_count == 0 and error_count > 0 and scan_reason == "ok":
-                effective_reason = "api_error"
+    def log_scan_end() -> None:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        effective_reason = scan_reason
+        if scanned_count == 0 and error_count > 0 and scan_reason == "ok":
+            effective_reason = "api_error"
 
-            anomaly_reason = effective_reason
-            if universe_count == 0:
-                anomaly_reason = "universe_empty"
-            elif returned_early_guard:
-                anomaly_reason = (
-                    "outside_window_skip" if not window_allowed else "returned_early"
-                )
-            elif scanned_count == 0 and not market_bars:
-                anomaly_reason = "market_bars_insufficient"
+        anomaly_reason = effective_reason
+        if universe_count == 0:
+            anomaly_reason = "universe_empty"
+        elif returned_early_guard:
+            anomaly_reason = "outside_window_skip" if not window_allowed else "returned_early"
+        elif scanned_count == 0 and not market_bars:
+            anomaly_reason = "market_bars_insufficient"
 
-            scan_end_message = (
-                f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
-                f"triggered={triggered_count} errors={error_count} reason={effective_reason}"
+        scan_end_message = (
+            f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
+            f"triggered={triggered_count} errors={error_count} reason={effective_reason}"
+        )
+
+        if universe_count > 0 and scanned_count == 0:
+            logger.error(
+                "scan anomaly | universe_count={universe_count} scanned=0 reason={reason} "
+                "window={window} scan_outside_window={scan_outside_window} "
+                "market_symbol={market_symbol} returned_early_guard={returned_early_guard}",
+                universe_count=universe_count,
+                reason=anomaly_reason,
+                window=window_label,
+                scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+                market_symbol=market_symbol,
+                returned_early_guard=returned_early_guard,
             )
-
-            if universe_count > 0 and scanned_count == 0:
-                logger.error(
-                    "scan anomaly | universe_count={universe_count} scanned=0 reason={reason} "
-                    "window={window} scan_outside_window={scan_outside_window} "
-                    "market_symbol={market_symbol} returned_early_guard={returned_early_guard}",
-                    universe_count=universe_count,
-                    reason=anomaly_reason,
-                    window=window_label,
-                    scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
-                    market_symbol=market_symbol,
-                    returned_early_guard=returned_early_guard,
-                )
 
         logger.info(scan_end_message)
 
@@ -479,7 +478,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     )
 
                 trace = DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
-                idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
+                try:
+                    idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
+                except Exception as exc:  # noqa: BLE001
+                    symbol_error_recorded = True
+                    error_count += 1
+                    logger.opt(exception=exc).error(
+                        "strategy execution failed", symbol=symbol, strategy="FlagshipStrategy"
+                    )
+                    continue
                 symbol_traces.append((symbol, trace))
                 if not idea:
                     skip_reason = trace.skip_reason or "unknown"
