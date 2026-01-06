@@ -135,6 +135,34 @@ class FlagshipStrategy:
         self.settings = get_settings()
         self.tz = ZoneInfo(tz or self.settings.TIMEZONE)
 
+    def _window_label(self, ts: datetime | None = None) -> str:
+        ts_val = ts
+        if isinstance(ts_val, (int, float)):
+            ts_val = datetime.fromtimestamp(ts_val / 1000, tz=self.tz)
+        elif isinstance(ts_val, str):
+            ts_clean = ts_val.replace("Z", "+00:00") if ts_val.endswith("Z") else ts_val
+            try:
+                ts_val = datetime.fromisoformat(ts_clean)
+            except ValueError:
+                ts_val = None
+
+        now = ts_val or datetime.now(self.tz)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=self.tz)
+        now_local = now.astimezone(self.tz)
+        rth_start = time(9, 30)
+        rth_end = time(16, 0)
+        if rth_start <= now_local.time() <= rth_end:
+            return "RTH"
+        if now_local.time() < rth_start:
+            return "PM"
+        return "AH"
+
+    def min_bars_for_window(self, window_label: str) -> int:
+        if window_label == "RTH":
+            return max(self.settings.MIN_BARS_RTH, self.settings.BOX_BARS)
+        return max(self.settings.MIN_BARS_NON_RTH, self.settings.BOX_BARS)
+
     def _estimate_avg_volume_from_bars(self, bars: List[Bar]) -> float:
         if not bars:
             return 0.0
@@ -142,10 +170,12 @@ class FlagshipStrategy:
         total_volume = sum(b.volume for b in sample)
         return max(total_volume, 0.0) * 3
 
-    def market_bias(self, market_bars: List[Dict[str, Any]]) -> Tuple[str | None, bool]:
-        bars = _to_bars(market_bars, symbol="MARKET")
+    def market_bias(
+        self, market_bars: List[Dict[str, Any]], market_symbol: str = "MARKET"
+    ) -> Tuple[str | None, bool, Dict[str, Any]]:
+        bars = _to_bars(market_bars, symbol=market_symbol)
         if not bars:
-            return None, False
+            return None, False, {}
         closes = [b.close for b in bars]
         vwap_price = _vwap(bars)
         ema_series = _ema(closes, span=20)
@@ -164,13 +194,38 @@ class FlagshipStrategy:
                 crossings += 1
         atr_vals = _atr([b.high for b in bars], [b.low for b in bars], closes)
         panic = False
+        atr_ratio = None
+        recent_avg = None
         if len(atr_vals) > 20:
             recent_avg = sum(atr_vals[-20:]) / len(atr_vals[-20:])
-            if atr_vals[-1] > 1.5 * recent_avg:
+            atr_ratio = atr_vals[-1] / recent_avg if recent_avg else None
+            if atr_ratio and atr_ratio > 1.5:
                 panic = True
         if crossings >= 3:
             panic = True
-        return bias, panic
+        panic_details = {
+            "market_symbol": market_symbol,
+            "atr_current": atr_vals[-1] if atr_vals else None,
+            "atr_recent_avg": recent_avg,
+            "atr_ratio": atr_ratio,
+            "atr_ratio_threshold": 1.5,
+            "vwap_crossings": crossings,
+            "crossings_threshold": 3,
+            "bars": len(bars),
+        }
+        logger.debug(
+            "market panic evaluation",
+            market_symbol=market_symbol,
+            atr_current=panic_details["atr_current"],
+            atr_recent_avg=panic_details["atr_recent_avg"],
+            atr_ratio=panic_details["atr_ratio"],
+            atr_ratio_threshold=panic_details["atr_ratio_threshold"],
+            vwap_crossings=crossings,
+            crossings_threshold=panic_details["crossings_threshold"],
+            bias=bias,
+            panic=panic,
+        )
+        return bias, panic, panic_details
 
     def evaluate(
         self,
@@ -179,24 +234,36 @@ class FlagshipStrategy:
         daily: Dict[str, Any] | None,
         market_bars: List[Dict[str, Any]],
         decision_trace: DecisionTrace | None = None,
+        window_label: str | None = None,
     ) -> Tuple[StockIdea | None, DecisionTrace]:
         settings = self.settings
         trace = decision_trace or DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
-        trace.add_inputs({"bar_count": len(bars_raw), "timezone": str(self.tz)})
+        window = window_label or self._window_label(bars_raw[-1].get("ts") if bars_raw else None)
+        min_bars_required = self.min_bars_for_window(window)
+        trace.add_inputs(
+            {
+                "bar_count": len(bars_raw),
+                "timezone": str(self.tz),
+                "window_label": window,
+            }
+        )
+        trace.add_computed("min_bars_required", min_bars_required)
 
         def skip(reason: str, details: Dict[str, Any] | None = None) -> Tuple[StockIdea | None, DecisionTrace]:
             trace.record_gate(reason, passed=False, details=details)
             trace.mark_skip(reason, details)
             return None, trace
 
-        if len(bars_raw) < settings.BOX_BARS * 3:
-            return skip("insufficient_bars", {"bar_count": len(bars_raw)})
+        if len(bars_raw) < min_bars_required:
+            return skip(
+                "insufficient_bars", {"bar_count": len(bars_raw), "min_bars": min_bars_required}
+            )
 
         bars = _to_bars(bars_raw, symbol=symbol)
-        if len(bars) < settings.BOX_BARS * 3:
+        if len(bars) < min_bars_required:
             return skip(
                 "invalid_bars",
-                {"bar_count": len(bars), "required": settings.BOX_BARS * 3},
+                {"bar_count": len(bars), "required": min_bars_required},
             )
         closes = [b.close for b in bars]
         highs = [b.high for b in bars]
@@ -231,9 +298,7 @@ class FlagshipStrategy:
             return skip("price_below_min", {"last_close": last_close, "min_price": settings.MIN_PRICE})
         if last_close > settings.MAX_PRICE:
             return skip("price_above_max", {"last_close": last_close, "max_price": settings.MAX_PRICE})
-        rth_start = time(9, 30)
-        rth_end = time(16, 0)
-        now_label = "RTH" if rth_start <= bars[-1].ts.time() <= rth_end else "AH"
+        now_label = window
         min_required_volume = (
             settings.MIN_AVG_DAILY_VOLUME
             if now_label == "RTH"
@@ -282,13 +347,23 @@ class FlagshipStrategy:
         if settings.SCAN_OUTSIDE_WINDOW:
             trace.add_computed("window_override", True)
 
+        market_panic_details: Dict[str, Any] = {}
         if market_bars:
-            market_bias, panic = self.market_bias(market_bars)
+            market_bias, panic, market_panic_details = self.market_bias(market_bars, market_symbol="QQQ")
         else:
             market_bias, panic = None, False
         trace.add_computeds({"market_bias": market_bias, "market_panic": panic})
+        trace.add_computed("market_panic_details", market_panic_details)
+        panic_penalty = 1.0
         if panic:
-            return skip("market_panic")
+            trace.add_computed("market_panic_flag", True)
+            panic_penalty = 0.7 if now_label == "RTH" else 0.6
+            if settings.DEV_TEST_MODE:
+                panic_penalty = max(panic_penalty, 0.8)
+            trace.add_computed("market_panic_penalty", panic_penalty)
+            trace.add_note(
+                f"market_panic_soften window={now_label} penalty={panic_penalty}",
+            )
 
         breakout_bar = bars[-1]
         box = bars[-settings.BOX_BARS - 1 : -1]
@@ -393,7 +468,7 @@ class FlagshipStrategy:
                 confidence += 0.5
             if direction == 'SHORT' and pos_in_range <= 0.2:
                 confidence += 0.5
-        confidence = cap_score(confidence)
+        confidence = cap_score(confidence * panic_penalty)
 
         trace.add_computeds(
             {

@@ -34,6 +34,9 @@ class DecisionTrace:
     def add_computeds(self, data: Dict[str, Any]) -> None:
         self.computed.update(data)
 
+    def add_note(self, note: str) -> None:
+        self.notes.append(note)
+
     def record_gate(self, name: str, passed: bool, details: Dict[str, Any] | None = None) -> None:
         gate_details = details or {}
         self.gates.append(GateTrace(name=name, passed=passed, details=gate_details))
