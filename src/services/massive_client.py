@@ -172,8 +172,10 @@ class MassiveClient:
         multiplier, timespan = self._timeframe_to_range(timeframe)
         ny_tz = ZoneInfo("America/New_York")
         now = datetime.now(ny_tz)
-        to_date = now.date().isoformat()
         session = "rth" if settings.RTH_ONLY else "all"
+        approx_minutes = limit * multiplier
+        from_dt = now - timedelta(minutes=approx_minutes * 2)
+        to_date = now.date().isoformat()
 
         def normalize_bars(raw: List[Dict[str, Any]] | Dict[str, Any]) -> List[Dict[str, Any]]:
             raw_bars = raw.get("results", raw) if isinstance(raw, dict) else raw
@@ -201,8 +203,7 @@ class MassiveClient:
                         return ts
                 return ts or 0
 
-            def fetch_polygon_bars(range_days: int, api_limit: int) -> List[Dict[str, Any]]:
-                from_date = (now - timedelta(days=range_days)).date().isoformat()
+            def fetch_polygon_bars(from_date: str, api_limit: int) -> List[Dict[str, Any]]:
                 path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
                 params = {"adjusted": True, "sort": "desc", "limit": api_limit}
                 data = self._request(
@@ -213,6 +214,9 @@ class MassiveClient:
                 )
                 bars = normalize_bars(data)
                 sorted_bars = sorted(bars, key=_ts_key)
+                from_dt_parsed = datetime.fromisoformat(from_date).date()
+                to_dt_parsed = datetime.fromisoformat(to_date).date()
+                requested_range_days = (to_dt_parsed - from_dt_parsed).days + 1
                 sliced = sorted_bars[-limit:]
                 logger.info(
                     "bars fetched | symbol={symbol} provider=polygon timeframe={tf} "
@@ -226,18 +230,24 @@ class MassiveClient:
                     final_returned=len(sliced),
                     from_date=from_date,
                     to_date=to_date,
-                    requested_range_days=range_days,
+                    requested_range_days=requested_range_days,
                 )
-                return sliced if sliced else sorted_bars
+                return sorted_bars
 
-            primary_range_days = 10
-            primary_limit = max(limit * 3, limit)
-            bars = fetch_polygon_bars(primary_range_days, primary_limit)
+            min_bars_setting = getattr(settings, "MIN_BARS", limit)
+            desired_min = min(limit, max(min_bars_setting, 10))
+            api_limit = max(limit * 3, limit)
+            lookbacks = [0, 2, 5, 10]
+            attempt_dates = []
+            for days in lookbacks:
+                attempt_dt = from_dt - timedelta(days=days)
+                attempt_dates.append(attempt_dt.date().isoformat())
 
-            if len(bars) < limit or len(bars) < settings.MIN_BARS:
-                fallback_range_days = 30
-                fallback_limit = max(5000, limit)
-                bars = fetch_polygon_bars(fallback_range_days, fallback_limit)
+            bars: List[Dict[str, Any]] = []
+            for attempt_from_date in dict.fromkeys(attempt_dates):
+                bars = fetch_polygon_bars(attempt_from_date, api_limit)
+                if len(bars) >= desired_min:
+                    break
 
             return bars[-limit:]
 

@@ -128,29 +128,39 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             else:
                 scan_run.notes = note
 
-    def log_scan_end() -> None:
-        duration_ms = int((time.monotonic() - start) * 1000)
-        effective_reason = scan_reason
-        if scanned_count == 0 and error_count > 0 and scan_reason == "ok":
-            effective_reason = "api_error"
+        def log_scan_end() -> None:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            effective_reason = scan_reason
+            if scanned_count == 0 and error_count > 0 and scan_reason == "ok":
+                effective_reason = "api_error"
 
-        scan_end_message = (
-            f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
-            f"triggered={triggered_count} errors={error_count} reason={effective_reason}"
-        )
+            anomaly_reason = effective_reason
+            if universe_count == 0:
+                anomaly_reason = "universe_empty"
+            elif returned_early_guard:
+                anomaly_reason = (
+                    "outside_window_skip" if not window_allowed else "returned_early"
+                )
+            elif scanned_count == 0 and not market_bars:
+                anomaly_reason = "market_bars_insufficient"
 
-        if universe_count > 0 and scanned_count == 0:
-            logger.error(
-                "scan anomaly | universe_count={universe_count} scanned=0 reason={reason} "
-                "window={window} scan_outside_window={scan_outside_window} "
-                "market_symbol={market_symbol} returned_early_guard={returned_early_guard}",
-                universe_count=universe_count,
-                reason=effective_reason,
-                window=window_label,
-                scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
-                market_symbol=market_symbol,
-                returned_early_guard=returned_early_guard,
+            scan_end_message = (
+                f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
+                f"triggered={triggered_count} errors={error_count} reason={effective_reason}"
             )
+
+            if universe_count > 0 and scanned_count == 0:
+                logger.error(
+                    "scan anomaly | universe_count={universe_count} scanned=0 reason={reason} "
+                    "window={window} scan_outside_window={scan_outside_window} "
+                    "market_symbol={market_symbol} returned_early_guard={returned_early_guard}",
+                    universe_count=universe_count,
+                    reason=anomaly_reason,
+                    window=window_label,
+                    scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+                    market_symbol=market_symbol,
+                    returned_early_guard=returned_early_guard,
+                )
 
         logger.info(scan_end_message)
 
@@ -291,6 +301,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 if db_persist_available and scan_run:
                     scan_run.finished_at = datetime.utcnow()
                     append_run_note("Outside allowed window")
+                logger.warning(
+                    "scan skipped outside allowed window",
+                    window_label=window_label,
+                    scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+                )
                 result = {"alerts": [], "notes": "Outside allowed window"}
                 if scan_reason == "ok":
                     scan_reason = "outside_window"
@@ -378,344 +393,349 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
         for symbol in universe:
             scanned_count += 1
-                symbol_error_recorded = False
+            symbol_error_recorded = False
+            try:
+                bars_start = time.perf_counter()
+                bars: List[Dict[str, Any]] = []
+                requested_limit = settings.BOX_BARS * 3
                 try:
-                    bars_start = time.perf_counter()
-                    bars: List[Dict[str, Any]] = []
-                    requested_limit = settings.BOX_BARS * 3
-                    try:
-                        bars = client.get_bars(
-                            symbol, timeframe="5m", limit=requested_limit
-                        )
-                    except (httpx.HTTPStatusError, httpx.RequestError, MassiveNotFoundError) as exc:
-                        record_symbol_error("bars", exc, endpoint=extract_endpoint(exc))
-                        continue
-                    except Exception as exc:  # noqa: BLE001
-                        record_symbol_error("bars", exc)
-                        continue
-                    returned_count = len(bars)
-                    logger.info(
-                        f"bars fetched | symbol={symbol} tf=5m requested={requested_limit} returned={returned_count}",
-                        symbol=symbol,
-                        requested=requested_limit,
-                        returned=returned_count,
-                        duration_ms=int((time.perf_counter() - bars_start) * 1000),
+                    bars = client.get_bars(
+                        symbol, timeframe="5m", limit=requested_limit
                     )
-                    if not bars:
-                        skip_reasons["no_bars"] += 1
-                        logger.warning("no bars returned", symbol=symbol)
-                        continue
+                except (
+                    httpx.HTTPStatusError,
+                    httpx.RequestError,
+                    MassiveNotFoundError,
+                ) as exc:
+                    record_symbol_error("bars", exc, endpoint=extract_endpoint(exc))
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    record_symbol_error("bars", exc)
+                    continue
+                returned_count = len(bars)
+                logger.info(
+                    f"bars fetched | symbol={symbol} tf=5m requested={requested_limit} returned={returned_count}",
+                    symbol=symbol,
+                    requested=requested_limit,
+                    returned=returned_count,
+                    duration_ms=int((time.perf_counter() - bars_start) * 1000),
+                )
+                if not bars:
+                    skip_reasons["no_bars"] += 1
+                    logger.warning("no bars returned", symbol=symbol)
+                    continue
 
-                    daily_start = time.perf_counter()
-                    daily = None
+                daily_start = time.perf_counter()
+                daily = None
+                try:
+                    daily = client.get_daily_snapshot(symbol)
+                except MassiveNotFoundError as exc:
+                    endpoint = extract_endpoint(exc)
+                    logger.warning(
+                        "snapshot unavailable, continuing with bars only",
+                        symbol=symbol,
+                        error=str(exc),
+                        endpoint=endpoint,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "snapshot unavailable, continuing with bars only",
+                        symbol=symbol,
+                        error=str(exc),
+                    )
+                else:
+                    logger.debug(
+                        "daily snapshot fetched",
+                        symbol=symbol,
+                        duration_ms=int((time.perf_counter() - daily_start) * 1000),
+                    )
+
+                if not daily or (
+                    isinstance(daily, dict)
+                    and daily.get("avg_daily_volume") is None
+                    and daily.get("volume") is None
+                ):
+                    fallback_bars_count = min(len(bars), 78) if bars else 0
+                    fallback_bars_count = min(fallback_bars_count or len(bars), 100)
+                    bars_raw_tail = bars[-fallback_bars_count:]
+                    bars_total_volume = sum(
+                        (bar.get("v") or bar.get("volume") or 0) for bar in bars_raw_tail
+                    )
+                    est_avg_daily_volume = max(bars_total_volume, 1) * 3
+                    daily = {
+                        "avg_daily_volume": est_avg_daily_volume,
+                        "volume": bars_total_volume,
+                        "iv_percentile": None,
+                        "raw": {"fallback": True},
+                    }
+                    logger.warning(
+                        "daily snapshot fallback | "
+                        f"symbol={symbol} est_avg_daily_volume={est_avg_daily_volume} "
+                        f"bars_volume={bars_total_volume} bars_used={fallback_bars_count}",
+                        symbol=symbol,
+                        est_avg_daily_volume=est_avg_daily_volume,
+                        bars_volume=bars_total_volume,
+                        bars_used=fallback_bars_count,
+                    )
+
+                trace = DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
+                idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
+                symbol_traces.append((symbol, trace))
+                if not idea:
+                    skip_reason = trace.skip_reason or "unknown"
+                    skip_reasons[skip_reason] += 1
+                    logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
+                        f"strategy skipped | reason={skip_reason}",
+                        reason=skip_reason,
+                        gates=trace.failed_gates(),
+                        inputs=trace.inputs,
+                        computed=trace.computed,
+                    )
+                    continue
+
+                logger.info(
+                    "strategy passed",
+                    symbol=symbol,
+                    direction=idea.direction,
+                    confidence=idea.confidence,
+                )
+
+                expirations_start = time.perf_counter()
+                try:
+                    expirations = client.get_option_expirations(symbol)
+                except Exception as exc:  # noqa: BLE001
+                    record_symbol_error("options_expirations", exc)
+                    continue
+                logger.info(
+                    "expirations fetched",
+                    symbol=symbol,
+                    duration_ms=int((time.perf_counter() - expirations_start) * 1000),
+                    expirations=len(expirations),
+                )
+                iv_pct = daily.get("iv_percentile") if isinstance(daily, dict) else None
+
+                def load_chain(exp: str):
+                    chain_start = time.perf_counter()
                     try:
-                        daily = client.get_daily_snapshot(symbol)
+                        chain = client.get_option_chain(symbol, exp)
                     except MassiveNotFoundError as exc:
-                        endpoint = extract_endpoint(exc)
                         logger.warning(
-                            "snapshot unavailable, continuing with bars only",
+                            "options chain unavailable",
                             symbol=symbol,
-                            error=str(exc),
-                            endpoint=endpoint,
+                            expiration=exp,
+                            status_code=404,
+                            endpoint="/v3/reference/options/contracts",
                         )
+                        return []
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "snapshot unavailable, continuing with bars only",
-                            symbol=symbol,
-                            error=str(exc),
-                        )
-                    else:
-                        logger.debug(
-                            "daily snapshot fetched",
-                            symbol=symbol,
-                            duration_ms=int((time.perf_counter() - daily_start) * 1000),
-                        )
-                    if not daily or (
-                        isinstance(daily, dict)
-                        and daily.get("avg_daily_volume") is None
-                        and daily.get("volume") is None
-                    ):
-                        fallback_bars_count = min(len(bars), 78) if bars else 0
-                        fallback_bars_count = min(fallback_bars_count or len(bars), 100)
-                        bars_raw_tail = bars[-fallback_bars_count:]
-                        bars_total_volume = sum(
-                            (bar.get("v") or bar.get("volume") or 0) for bar in bars_raw_tail
-                        )
-                        est_avg_daily_volume = max(bars_total_volume, 1) * 3
-                        daily = {
-                            "avg_daily_volume": est_avg_daily_volume,
-                            "volume": bars_total_volume,
-                            "iv_percentile": None,
-                            "raw": {"fallback": True},
-                        }
-                        logger.warning(
-                            "daily snapshot fallback | "
-                            f"symbol={symbol} est_avg_daily_volume={est_avg_daily_volume} "
-                            f"bars_volume={bars_total_volume} bars_used={fallback_bars_count}",
-                            symbol=symbol,
-                            est_avg_daily_volume=est_avg_daily_volume,
-                            bars_volume=bars_total_volume,
-                            bars_used=fallback_bars_count,
-                        )
+                        record_symbol_error("options_chain", exc)
+                        raise
+                    logger.debug(
+                        "option chain fetched",
+                        symbol=symbol,
+                        expiration=exp,
+                        duration_ms=int((time.perf_counter() - chain_start) * 1000),
+                        contracts=len(chain),
+                    )
+                    return chain
 
-                    trace = DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
-                    idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
-                    symbol_traces.append((symbol, trace))
-                    if not idea:
-                        skip_reason = trace.skip_reason or "unknown"
-                        skip_reasons[skip_reason] += 1
+                try:
+                    bars_ts = (
+                        bars[-1]["ts"]
+                        if isinstance(bars[-1]["ts"], datetime)
+                        else datetime.fromisoformat(bars[-1]["ts"])
+                    )
+                    opt_result = optimizer.run(
+                        symbol,
+                        idea.direction,
+                        idea.expected_window,
+                        bars_ts,
+                        expirations,
+                        load_chain,
+                        iv_percentile=iv_pct,
+                    )
+                except MassiveNotFoundError as exc:
+                    logger.warning(
+                        "options recommendation unavailable",
+                        symbol=symbol,
+                        status_code=404,
+                        endpoint="/v3/reference/options/contracts",
+                    )
+                    opt_result = OptionResult(stock_only=True, reason=str(exc), candidates=[])
+                except Exception as exc:  # noqa: BLE001
+                    record_symbol_error("optimizer", exc)
+                    continue
+
+                confidence = idea.confidence
+                option_picks: List[OptionPick] = []
+                if opt_result.stock_only:
+                    confidence = max(0.0, confidence - 1.0)
+                    idea.debug["debug_reasons"].append(
+                        opt_result.reason or "stock-only"
+                    )
+                else:
+                    option_picks = opt_result.candidates
+
+                logger.info(
+                    "optimizer result",
+                    symbol=symbol,
+                    stock_only=opt_result.stock_only,
+                    candidate_count=len(option_picks),
+                )
+
+                would_trigger = confidence >= settings.MIN_CONFIDENCE_TO_ALERT
+                candidate_scores.append((symbol, confidence, would_trigger))
+
+                if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
+                    trace.mark_skip(
+                        "confidence_below_min",
+                        {
+                            "confidence": confidence,
+                            "min_confidence": settings.MIN_CONFIDENCE_TO_ALERT,
+                        },
+                    )
+                    skip_reasons["confidence_below_min"] += 1
+                    if skip_logs_emitted < skip_log_limit:
+                        skip_logs_emitted += 1
                         logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
-                            f"strategy skipped | reason={skip_reason}",
-                            reason=skip_reason,
+                            "strategy skipped | reason=confidence_below_min",
+                            reason="confidence_below_min",
                             gates=trace.failed_gates(),
                             inputs=trace.inputs,
                             computed=trace.computed,
                         )
-                        continue
-
-                    logger.info(
-                        "strategy passed",
-                        symbol=symbol,
-                        direction=idea.direction,
-                        confidence=idea.confidence,
-                    )
-
-                    expirations_start = time.perf_counter()
-                    try:
-                        expirations = client.get_option_expirations(symbol)
-                    except Exception as exc:  # noqa: BLE001
-                        record_symbol_error("options_expirations", exc)
-                        continue
-                    logger.info(
-                        "expirations fetched",
-                        symbol=symbol,
-                        duration_ms=int((time.perf_counter() - expirations_start) * 1000),
-                        expirations=len(expirations),
-                    )
-                    iv_pct = daily.get("iv_percentile") if isinstance(daily, dict) else None
-
-                    def load_chain(exp: str):
-                        chain_start = time.perf_counter()
-                        try:
-                            chain = client.get_option_chain(symbol, exp)
-                        except MassiveNotFoundError as exc:
-                            logger.warning(
-                                "options chain unavailable",
-                                symbol=symbol,
-                                expiration=exp,
-                                status_code=404,
-                                endpoint="/v3/reference/options/contracts",
-                            )
-                            return []
-                        except Exception as exc:  # noqa: BLE001
-                            record_symbol_error("options_chain", exc)
-                            raise
-                        logger.debug(
-                            "option chain fetched",
-                            symbol=symbol,
-                            expiration=exp,
-                            duration_ms=int((time.perf_counter() - chain_start) * 1000),
-                            contracts=len(chain),
-                        )
-                        return chain
-
-                    try:
-                        bars_ts = (
-                            bars[-1]["ts"]
-                            if isinstance(bars[-1]["ts"], datetime)
-                            else datetime.fromisoformat(bars[-1]["ts"])
-                        )
-                        opt_result = optimizer.run(
-                            symbol,
-                            idea.direction,
-                            idea.expected_window,
-                            bars_ts,
-                            expirations,
-                            load_chain,
-                            iv_percentile=iv_pct,
-                        )
-                    except MassiveNotFoundError as exc:
-                        logger.warning(
-                            "options recommendation unavailable",
-                            symbol=symbol,
-                            status_code=404,
-                            endpoint="/v3/reference/options/contracts",
-                        )
-                        opt_result = OptionResult(stock_only=True, reason=str(exc), candidates=[])
-                    except Exception as exc:  # noqa: BLE001
-                        record_symbol_error("optimizer", exc)
-                        continue
-
-                    confidence = idea.confidence
-                    option_picks: List[OptionPick] = []
-                    if opt_result.stock_only:
-                        confidence = max(0.0, confidence - 1.0)
-                        idea.debug["debug_reasons"].append(
-                            opt_result.reason or "stock-only"
-                        )
-                    else:
-                        option_picks = opt_result.candidates
-
-                    logger.info(
-                        "optimizer result",
-                        symbol=symbol,
-                        stock_only=opt_result.stock_only,
-                        candidate_count=len(option_picks),
-                    )
-
-                    would_trigger = confidence >= settings.MIN_CONFIDENCE_TO_ALERT
-                    candidate_scores.append((symbol, confidence, would_trigger))
-
-                    if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
-                        trace.mark_skip(
-                            "confidence_below_min",
-                            {
-                                "confidence": confidence,
-                                "min_confidence": settings.MIN_CONFIDENCE_TO_ALERT,
-                            },
-                        )
-                        skip_reasons["confidence_below_min"] += 1
-                        if skip_logs_emitted < skip_log_limit:
-                            skip_logs_emitted += 1
-                            logger.bind(symbol=symbol, strategy="FlagshipStrategy").info(
-                                "strategy skipped | reason=confidence_below_min",
-                                reason="confidence_below_min",
-                                gates=trace.failed_gates(),
-                                inputs=trace.inputs,
-                                computed=trace.computed,
-                            )
-                        continue
-
-                    computed = trace.computed
-                    alert_dict = {
-                        "symbol": symbol,
-                        "direction": idea.direction,
-                        "confidence": confidence,
-                        "expected_window": idea.expected_window,
-                        "entry": idea.entry,
-                        "stop": idea.stop,
-                        "t1": idea.t1,
-                        "t2": idea.t2,
-                        "box_high": computed.get("box_high"),
-                        "box_low": computed.get("box_low"),
-                        "range_pct": computed.get("range_pct"),
-                        "atr_ratio": computed.get("atr_ratio"),
-                        "vol_ratio": computed.get("vol_ratio"),
-                        "break_vol_mult": computed.get("break_vol_mult"),
-                        "extension_pct": computed.get("extension_pct"),
-                        "market_bias": computed.get("market_bias"),
-                        "vwap_ok": computed.get("vwap_ok"),
-                    }
-                    option_payloads = []
-                    if option_picks:
-                        for pick in option_picks:
-                            option_payloads.append(
-                                {
-                                    "tier": pick.tier,
-                                    "contract_symbol": pick.contract.contract_symbol,
-                                    "expiry": pick.contract.expiry,
-                                    "strike": pick.contract.strike,
-                                    "call_put": pick.contract.call_put,
-                                    "bid": pick.contract.bid,
-                                    "ask": pick.contract.ask,
-                                    "mid": pick.contract.mid,
-                                    "spread_pct": pick.contract.spread_pct,
-                                    "volume": pick.contract.volume,
-                                    "oi": pick.contract.oi,
-                                    "delta": pick.contract.delta,
-                                    "gamma": pick.contract.gamma,
-                                    "theta": pick.contract.theta,
-                                    "iv": pick.contract.iv,
-                                    "iv_percentile": pick.contract.iv_percentile,
-                                    "rationale": pick.rationale,
-                                    "exit_plan": pick.exit_plan,
-                                }
-                            )
-
-                    texts = alert_service.build_alert_texts(
-                        alert_dict, option_payloads if option_payloads else None
-                    )
-                    if settings.DEBUG_MODE:
-                        status_code, tg_resp = None, "debug-mode"
-                        sent_success = False
-                        logger.info(
-                            "alert suppressed by debug mode",
-                            symbol=symbol,
-                            confidence=confidence,
-                        )
-                        reason = "debug_mode"
-                    else:
-                        try:
-                            status_code, tg_resp = alert_service.send_telegram_message(
-                                texts["short"]
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            record_symbol_error("alert_send", exc)
-                            logger.info(
-                                f"alert send result | symbol={symbol} channel=telegram result=failed reason={str(exc)}"
-                            )
-                            continue
-                        sent_success = status_code == 200
-                        if status_code is None:
-                            reason = tg_resp or "no-status"
-                        elif status_code != 200:
-                            reason = f"status_code={status_code}"
-                        else:
-                            reason = "ok"
-                        if not sent_success:
-                            record_symbol_error("alert_send", RuntimeError(reason))
-                        result_label = "sent" if sent_success else "failed"
-                        message = (
-                            f"alert send result | symbol={symbol} channel=telegram "
-                            f"result={result_label} reason={reason}"
-                        )
-                        logger.info(message)
-                        logger.debug("telegram response", symbol=symbol, response=tg_resp)
-
-                    alert_row = Alert(
-                        symbol=symbol,
-                        direction=idea.direction,
-                        confidence=confidence,
-                        expected_window=idea.expected_window,
-                        entry=idea.entry,
-                        stop=idea.stop,
-                        t1=idea.t1,
-                        t2=idea.t2,
-                        box_high=alert_dict["box_high"],
-                        box_low=alert_dict["box_low"],
-                        range_pct=alert_dict["range_pct"],
-                        atr_ratio=alert_dict["atr_ratio"],
-                        vol_ratio=alert_dict["vol_ratio"],
-                        break_vol_mult=alert_dict["break_vol_mult"],
-                        extension_pct=alert_dict["extension_pct"],
-                        market_bias=alert_dict["market_bias"],
-                        vwap_ok=alert_dict["vwap_ok"],
-                        alert_text_short=texts["short"],
-                        alert_text_medium=texts["medium"],
-                        alert_text_deep=texts["deep_dive"],
-                        telegram_status_code=status_code,
-                        telegram_response=tg_resp,
-                    )
-                    if db_persist_available:
-                        session.add(alert_row)
-                        session.flush()
-                        logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
-
-                        for op in option_payloads:
-                            oc = OptionCandidate(alert_id=alert_row.id, **op)
-                            session.add(oc)
-
-                    alerts_triggered.append(
-                        {"symbol": symbol, "direction": idea.direction, "confidence": confidence}
-                    )
-                    if sent_success:
-                        triggered_count += 1
-                except Exception as exc:  # noqa: BLE001
-                    if not symbol_error_recorded:
-                        symbol_error_recorded = True
-                        error_count += 1
-                    logger.exception("scan error for symbol", symbol=symbol, error=str(exc))
                     continue
+
+                computed = trace.computed
+                alert_dict = {
+                    "symbol": symbol,
+                    "direction": idea.direction,
+                    "confidence": confidence,
+                    "expected_window": idea.expected_window,
+                    "entry": idea.entry,
+                    "stop": idea.stop,
+                    "t1": idea.t1,
+                    "t2": idea.t2,
+                    "box_high": computed.get("box_high"),
+                    "box_low": computed.get("box_low"),
+                    "range_pct": computed.get("range_pct"),
+                    "atr_ratio": computed.get("atr_ratio"),
+                    "vol_ratio": computed.get("vol_ratio"),
+                    "break_vol_mult": computed.get("break_vol_mult"),
+                    "extension_pct": computed.get("extension_pct"),
+                    "market_bias": computed.get("market_bias"),
+                    "vwap_ok": computed.get("vwap_ok"),
+                }
+                option_payloads = []
+                if option_picks:
+                    for pick in option_picks:
+                        option_payloads.append(
+                            {
+                                "tier": pick.tier,
+                                "contract_symbol": pick.contract.contract_symbol,
+                                "expiry": pick.contract.expiry,
+                                "strike": pick.contract.strike,
+                                "call_put": pick.contract.call_put,
+                                "bid": pick.contract.bid,
+                                "ask": pick.contract.ask,
+                                "mid": pick.contract.mid,
+                                "spread_pct": pick.contract.spread_pct,
+                                "volume": pick.contract.volume,
+                                "oi": pick.contract.oi,
+                                "delta": pick.contract.delta,
+                                "gamma": pick.contract.gamma,
+                                "theta": pick.contract.theta,
+                                "iv": pick.contract.iv,
+                                "iv_percentile": pick.contract.iv_percentile,
+                                "rationale": pick.rationale,
+                                "exit_plan": pick.exit_plan,
+                            }
+                        )
+
+                texts = alert_service.build_alert_texts(
+                    alert_dict, option_payloads if option_payloads else None
+                )
+                if settings.DEBUG_MODE:
+                    status_code, tg_resp = None, "debug-mode"
+                    sent_success = False
+                    logger.info(
+                        "alert suppressed by debug mode",
+                        symbol=symbol,
+                        confidence=confidence,
+                    )
+                    reason = "debug_mode"
+                else:
+                    try:
+                        status_code, tg_resp = alert_service.send_telegram_message(
+                            texts["short"]
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        record_symbol_error("alert_send", exc)
+                        logger.info(
+                            f"alert send result | symbol={symbol} channel=telegram result=failed reason={str(exc)}"
+                        )
+                        continue
+                    sent_success = status_code == 200
+                    if status_code is None:
+                        reason = tg_resp or "no-status"
+                    elif status_code != 200:
+                        reason = f"status_code={status_code}"
+                    else:
+                        reason = "ok"
+                    if not sent_success:
+                        record_symbol_error("alert_send", RuntimeError(reason))
+                    result_label = "sent" if sent_success else "failed"
+                    message = (
+                        f"alert send result | symbol={symbol} channel=telegram "
+                        f"result={result_label} reason={reason}"
+                    )
+                    logger.info(message)
+                    logger.debug("telegram response", symbol=symbol, response=tg_resp)
+
+                alert_row = Alert(
+                    symbol=symbol,
+                    direction=idea.direction,
+                    confidence=confidence,
+                    expected_window=idea.expected_window,
+                    entry=idea.entry,
+                    stop=idea.stop,
+                    t1=idea.t1,
+                    t2=idea.t2,
+                    box_high=alert_dict["box_high"],
+                    box_low=alert_dict["box_low"],
+                    range_pct=alert_dict["range_pct"],
+                    atr_ratio=alert_dict["atr_ratio"],
+                    vol_ratio=alert_dict["vol_ratio"],
+                    break_vol_mult=alert_dict["break_vol_mult"],
+                    extension_pct=alert_dict["extension_pct"],
+                    market_bias=alert_dict["market_bias"],
+                    vwap_ok=alert_dict["vwap_ok"],
+                    alert_text_short=texts["short"],
+                    alert_text_medium=texts["medium"],
+                    alert_text_deep=texts["deep_dive"],
+                    telegram_status_code=status_code,
+                    telegram_response=tg_resp,
+                )
+                if db_persist_available:
+                    session.add(alert_row)
+                    session.flush()
+                    logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
+
+                    for op in option_payloads:
+                        oc = OptionCandidate(alert_id=alert_row.id, **op)
+                        session.add(oc)
+
+                alerts_triggered.append(
+                    {"symbol": symbol, "direction": idea.direction, "confidence": confidence}
+                )
+                if sent_success:
+                    triggered_count += 1
+            except Exception as exc:  # noqa: BLE001
+                if not symbol_error_recorded:
+                    symbol_error_recorded = True
+                    error_count += 1
+                logger.exception("scan error for symbol", symbol=symbol, error=str(exc))
+                continue
             if candidate_scores:
                 top_candidates = sorted(candidate_scores, key=lambda c: c[1], reverse=True)[:5]
                 logger.info(
