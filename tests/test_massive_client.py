@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import httpx
 import httpx
 
@@ -9,21 +11,29 @@ from src.services.massive_client import MassiveClient
 def test_get_bars_returns_list():
     results = [{"t": 1, "o": 1.0, "h": 2.0, "l": 0.5, "c": 1.5, "v": 100}]
 
+    call_count = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
         assert request.url.path.startswith("/v2/aggs/ticker/SPY/range/5/minute/")
         parts = request.url.path.rstrip("/").split("/")
         assert len(parts) >= 9
         from_date = parts[-2]
         to_date = parts[-1]
-        assert from_date == to_date
         assert len(from_date) == 10
         assert len(to_date) == 10
         assert from_date.count("-") == 2
         assert to_date.count("-") == 2
+        from_dt = datetime.fromisoformat(from_date).date()
+        to_dt = datetime.fromisoformat(to_date).date()
+        assert to_dt >= from_dt
+        assert (to_dt - from_dt).days >= 9
 
         assert request.url.params["adjusted"].lower() == "true"
         assert request.url.params["sort"] == "desc"
-        assert request.url.params["limit"] == "36"
+        expected_limit = "108" if call_count == 1 else "5000"
+        assert request.url.params["limit"] == expected_limit
         return httpx.Response(200, json={"results": results})
 
     transport = httpx.MockTransport(handler)
@@ -36,6 +46,7 @@ def test_get_bars_returns_list():
 
     assert isinstance(bars, list)
     assert bars[0]["t"] == 1
+    assert call_count == 2
 
 
 def test_get_option_expirations_uses_reference_contracts_with_pagination():
