@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
@@ -172,8 +172,7 @@ class MassiveClient:
         multiplier, timespan = self._timeframe_to_range(timeframe)
         ny_tz = ZoneInfo("America/New_York")
         now = datetime.now(ny_tz)
-        from_date = now.strftime("%Y-%m-%d")
-        to_date = now.strftime("%Y-%m-%d")
+        to_date = now.date().isoformat()
         session = "rth" if settings.RTH_ONLY else "all"
 
         def normalize_bars(raw: List[Dict[str, Any]] | Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -191,25 +190,55 @@ class MassiveClient:
             return normalized
 
         if self.provider == "polygon":
-            path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-            params = {"adjusted": True, "sort": "desc", "limit": limit}
-            data = self._request(
-                "GET",
-                path,
-                params=params,
-                symbol=symbol,
-            )
-            bars = normalize_bars(data)
-            logger.info(
-                "bars fetched | symbol={symbol} provider=polygon timeframe={tf} "
-                "requested={requested} returned={returned} from={from_date} to={to_date}",
-                symbol=symbol,
-                tf=timeframe,
-                requested=limit,
-                returned=len(bars),
-                from_date=from_date,
-                to_date=to_date,
-            )
+            def _ts_key(bar: Dict[str, Any]) -> Any:
+                ts = bar.get("t") or bar.get("ts") or bar.get("timestamp")
+                if isinstance(ts, datetime):
+                    return ts
+                if isinstance(ts, str):
+                    try:
+                        return datetime.fromisoformat(ts)
+                    except Exception:  # noqa: BLE001
+                        return ts
+                return ts or 0
+
+            def fetch_polygon_bars(range_days: int, api_limit: int) -> List[Dict[str, Any]]:
+                from_date = (now - timedelta(days=range_days)).date().isoformat()
+                path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+                params = {"adjusted": True, "sort": "desc", "limit": api_limit}
+                data = self._request(
+                    "GET",
+                    path,
+                    params=params,
+                    symbol=symbol,
+                )
+                bars = normalize_bars(data)
+                sorted_bars = sorted(bars, key=_ts_key)
+                sliced = sorted_bars[-limit:]
+                logger.info(
+                    "bars fetched | symbol={symbol} provider=polygon timeframe={tf} "
+                    "requested={requested} raw_returned={raw_returned} "
+                    "final_returned={final_returned} from={from_date} to={to_date} "
+                    "requested_range_days={requested_range_days}",
+                    symbol=symbol,
+                    tf=timeframe,
+                    requested=limit,
+                    raw_returned=len(sorted_bars),
+                    final_returned=len(sliced),
+                    from_date=from_date,
+                    to_date=to_date,
+                    requested_range_days=range_days,
+                )
+                return sliced if sliced else sorted_bars
+
+            primary_range_days = 10
+            primary_limit = max(limit * 3, limit)
+            bars = fetch_polygon_bars(primary_range_days, primary_limit)
+
+            if len(bars) < limit or len(bars) < settings.MIN_BARS:
+                fallback_range_days = 30
+                fallback_limit = max(5000, limit)
+                bars = fetch_polygon_bars(fallback_range_days, fallback_limit)
+
             return bars[-limit:]
 
         minutes_per_day = 390 if session == "rth" else 24 * 60

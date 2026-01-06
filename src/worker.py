@@ -99,6 +99,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     candidate_scores: List[Tuple[str, float, bool]] = []
     skip_reasons = Counter()
     symbol_traces: List[Tuple[str, DecisionTrace]] = []
+    returned_early_guard = False
+    market_symbol: str | None = None
 
     def reason_from_exception(exc: Exception) -> str:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -138,8 +140,16 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         )
 
         if universe_count > 0 and scanned_count == 0:
-            logger.warning(
-                f"scan anomaly | universe_count={universe_count} scanned=0 reason={effective_reason}"
+            logger.error(
+                "scan anomaly | universe_count={universe_count} scanned=0 reason={reason} "
+                "window={window} scan_outside_window={scan_outside_window} "
+                "market_symbol={market_symbol} returned_early_guard={returned_early_guard}",
+                universe_count=universe_count,
+                reason=effective_reason,
+                window=window_label,
+                scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
+                market_symbol=market_symbol,
+                returned_early_guard=returned_early_guard,
             )
 
         logger.info(scan_end_message)
@@ -284,6 +294,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 result = {"alerts": [], "notes": "Outside allowed window"}
                 if scan_reason == "ok":
                     scan_reason = "outside_window"
+                returned_early_guard = True
                 return result
 
             logger.info(
@@ -351,21 +362,22 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             nonlocal bars_404_count, error_count
             error_count += 1
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            logger.warning(
-                "symbol scan failed | symbol={symbol} stage={stage} status={status} "
-                "endpoint={endpoint} err={exc_type}: {message}",
+            logger.opt(exception=exc).error(
+                "symbol scan failed | symbol={symbol} stage={stage} status={status} endpoint={endpoint}",
                 symbol=symbol,
                 stage=stage,
                 status=status_code,
                 endpoint=endpoint,
-                exc_type=exc.__class__.__name__,
-                message=str(exc),
             )
             if isinstance(exc, MassiveNotFoundError) and stage == "bars":
                 bars_404_count += 1
 
-            for symbol in universe:
-                scanned_count += 1
+        logger.info(
+            "universe loop begin", symbols=universe[:5], universe_count=universe_count
+        )
+
+        for symbol in universe:
+            scanned_count += 1
                 symbol_error_recorded = False
                 try:
                     bars_start = time.perf_counter()
