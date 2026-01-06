@@ -128,6 +128,8 @@ DEBUG_MODE=false
 TEST_ALERT_ON_START=false
 SCAN_INTERVAL_SECONDS=60
 MIN_CONFIDENCE_TO_ALERT=7.5
+DEV_TEST_MODE=false
+ALERT_MODE=TRADE
 ```
 
 ### Install, migrate, and run
@@ -162,6 +164,8 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `SCAN_INTERVAL_SECONDS` – worker cadence.
 - `UNIVERSE` – comma-separated symbols scanned each cycle.
 - `RTH_ONLY`, `SCAN_OUTSIDE_WINDOW`, `ALLOWED_WINDOWS`, `TIMEZONE` – session controls.
+- `ALERT_MODE` – `TRADE` (default, RTH-only live alerts) or `WATCHLIST` (always allowed, marked non-executable).
+- `DEV_TEST_MODE` – lowers thresholds slightly for validation runs and allows IDEA/watchlist alerts.
 - `MIN_CONFIDENCE_TO_ALERT` – gating threshold for sending alerts.
 - `MIN_AVG_DAILY_VOLUME`, `MIN_PRICE`, `MAX_PRICE` – base liquidity and price filters.
 - `BOX_BARS`, `BOX_MAX_RANGE_PCT`, `ATR_COMP_FACTOR`, `VOL_CONTRACTION_FACTOR`, `BREAK_BUFFER_PCT`, `MAX_EXTENSION_PCT`, `BREAK_VOL_MULT`, `VWAP_CONFIRM` – flagship setup parameters.

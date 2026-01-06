@@ -23,11 +23,13 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str | None = None
     DEBUG_MODE: bool = False
     DEBUG_SYMBOL: str | None = None
+    DEV_TEST_MODE: bool = False
     TEST_ALERT_ON_START: bool = False
     SCAN_INTERVAL_SECONDS: int = 60
     UNIVERSE: str = "SPY,QQQ,IWM,NVDA,TSLA,AAPL,MSFT,AMZN,META,AMD,AVGO"
     RTH_ONLY: bool = True
     SCAN_OUTSIDE_WINDOW: bool = False
+    ALERT_MODE: str = "TRADE"
     MIN_CONFIDENCE_TO_ALERT: float = 7.5
     TIMEZONE: str = "America/New_York"
 
@@ -37,6 +39,8 @@ class Settings(BaseSettings):
     MIN_PRICE: float = 10.0
     MAX_PRICE: float = 1000.0
     BOX_BARS: int = 12
+    MIN_BARS_RTH: int = 36
+    MIN_BARS_NON_RTH: int = 18
     BOX_MAX_RANGE_PCT: float = 0.012
     ATR_COMP_FACTOR: float = 0.75
     VOL_CONTRACTION_FACTOR: float = 0.80

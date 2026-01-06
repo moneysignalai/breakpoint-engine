@@ -249,6 +249,10 @@ def _format_session_label(alert: Dict[str, Any]) -> tuple[str, str]:
 
 
 def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | None = None) -> dict[str, str]:
+    alert_mode = str(alert.get("alert_mode") or "TRADE").upper()
+    alert_label = str(alert.get("alert_label") or "ALERT").upper()
+    if alert_mode not in {"TRADE", "WATCHLIST"}:
+        alert_mode = "TRADE"
     symbol = alert.get("symbol", "?")
     direction = alert.get("direction", "?")
     entry = alert.get("entry")
@@ -266,11 +270,14 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     market_bias = alert.get("market_bias")
     expected_window = alert.get("expected_window")
 
+    short_prefix = ""
+    if alert_mode == "WATCHLIST" or alert_label not in {"ALERT", "TRADE"}:
+        short_prefix = f"[{alert_label if alert_label else alert_mode}] "
     short = (
-        f"{symbol} {direction} entry {_format_price(entry)} stop {_format_price(stop)} "
+        f"{short_prefix}{symbol} {direction} entry {_format_price(entry)} stop {_format_price(stop)} "
         f"T1 {_format_price(t1)} T2 {_format_price(t2)} (conf {float(confidence):.1f})"
         if confidence is not None
-        else f"{symbol} {direction} entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)}"
+        else f"{short_prefix}{symbol} {direction} entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)}"
     )
 
     entry_phrase = "hold above" if str(direction).upper() != "SHORT" else "hold below"
@@ -289,9 +296,12 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     else:
         trend_description = "Range"
 
+    header_label = alert_label if alert_label else "ALERT"
+    if alert_mode == "WATCHLIST":
+        header_label = "WATCHLIST" if alert_label == "ALERT" else alert_label
     standard_lines = [
         "─────────────────",
-        f"⚡ BREAKPOINT ALERT - {symbol}",
+        f"⚡ BREAKPOINT {header_label} - {symbol}",
         f"🕒 {ts_et}  ",
         f"⏰ {session_emoji} {session_label} · 🚦 Bias: {bias_text}",
         "",
@@ -340,6 +350,7 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     standard_lines.extend(
         [
             "",
+            f"🧪 Mode: {alert_mode.title()} ({alert_label.title() if alert_label else 'Alert'})",
             "🛡️ RISK NOTES",
             "• Take 40–60% at T1 · Runner to T2",
             "• Time stop: 30–60 min if no continuation",

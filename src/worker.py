@@ -88,12 +88,19 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     universe_count = len(universe)
     scanned_count = 0
     triggered_count = 0
+    idea_alerts_sent = 0
     error_count = 0
     bars_404_count = 0
     scan_reason: str = "ok"
     start = time.monotonic()
     tz = ZoneInfo(settings.TIMEZONE)
     now = datetime.now(tz)
+    dev_test_mode = bool(getattr(settings, "DEV_TEST_MODE", False))
+    effective_confidence_threshold = (
+        max(0.0, settings.MIN_CONFIDENCE_TO_ALERT - 0.5)
+        if dev_test_mode
+        else settings.MIN_CONFIDENCE_TO_ALERT
+    )
     skip_logs_emitted = 0
     skip_log_limit = float("inf") if debug_symbol else 15
     candidate_scores: List[Tuple[str, float, bool]] = []
@@ -171,7 +178,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         min_score = min(scores)
         max_score = max(scores)
         avg_score = sum(scores) / len(scores)
-        above = sum(1 for _, score, _ in candidate_scores if score >= settings.MIN_CONFIDENCE_TO_ALERT)
+        above = sum(1 for _, score, _ in candidate_scores if score >= effective_confidence_threshold)
         below = len(candidate_scores) - above
         bin_ranges = [(round(i / 5, 1), round((i + 1) / 5, 1)) for i in range(5)]
         bins_struct = []
@@ -193,7 +200,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             f"candidates={len(candidate_scores)} min={round(min_score, 3)} "
             f"max={round(max_score, 3)} avg={round(avg_score, 3)} "
             f"above_threshold={above} below_threshold={below} "
-            f"threshold={settings.MIN_CONFIDENCE_TO_ALERT} bins={bin_summary}"
+            f"threshold={effective_confidence_threshold} bins={bin_summary}"
         )
         logger.info(
             message,
@@ -203,7 +210,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             avg=round(avg_score, 3),
             above_threshold=above,
             below_threshold=below,
-            threshold=settings.MIN_CONFIDENCE_TO_ALERT,
+            threshold=effective_confidence_threshold,
             bins=bins_struct,
         )
 
@@ -257,9 +264,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         window_bounds=[{"start": s.isoformat(), "end": e.isoformat()} for s, e in windows],
     )
 
+    min_bars_required = strategy.min_bars_for_window(window_label)
     logger.info(
         f"scan start | universe_count={universe_count} window={window_label} "
-        f"scan_outside_window={settings.SCAN_OUTSIDE_WINDOW}"
+        f"scan_outside_window={settings.SCAN_OUTSIDE_WINDOW} min_bars={min_bars_required}",
+        dev_test_mode=dev_test_mode,
+        alert_mode=settings.ALERT_MODE,
+        confidence_threshold=effective_confidence_threshold,
     )
     result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
     scan_run: ScanRun | None = None
@@ -479,7 +490,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
                 trace = DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
                 try:
-                    idea, trace = strategy.evaluate(symbol, bars, daily, market_bars, trace)
+                    idea, trace = strategy.evaluate(
+                        symbol,
+                        bars,
+                        daily,
+                        market_bars,
+                        trace,
+                        window_label=window_label,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     symbol_error_recorded = True
                     error_count += 1
@@ -590,15 +608,15 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     candidate_count=len(option_picks),
                 )
 
-                would_trigger = confidence >= settings.MIN_CONFIDENCE_TO_ALERT
+                would_trigger = confidence >= effective_confidence_threshold
                 candidate_scores.append((symbol, confidence, would_trigger))
 
-                if confidence < settings.MIN_CONFIDENCE_TO_ALERT:
+                if not would_trigger:
                     trace.mark_skip(
                         "confidence_below_min",
                         {
                             "confidence": confidence,
-                            "min_confidence": settings.MIN_CONFIDENCE_TO_ALERT,
+                            "min_confidence": effective_confidence_threshold,
                         },
                     )
                     skip_reasons["confidence_below_min"] += 1
@@ -613,11 +631,34 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         )
                     continue
 
+                alert_label = "TRADE" if confidence >= settings.MIN_CONFIDENCE_TO_ALERT else "IDEA"
+                if alert_label == "IDEA" and idea_alerts_sent >= 3:
+                    trace.mark_skip(
+                        "dev_idea_limit",
+                        {
+                            "confidence": confidence,
+                            "limit": 3,
+                            "dev_test_mode": dev_test_mode,
+                        },
+                    )
+                    skip_reasons["dev_idea_limit"] += 1
+                    continue
+
+                effective_alert_mode = (settings.ALERT_MODE or "TRADE").upper()
+                if effective_alert_mode not in {"TRADE", "WATCHLIST"}:
+                    effective_alert_mode = "TRADE"
+                if effective_alert_mode == "TRADE" and window_label != "RTH":
+                    effective_alert_mode = "WATCHLIST"
+                if alert_label != "TRADE":
+                    effective_alert_mode = "WATCHLIST"
                 computed = trace.computed
                 alert_dict = {
                     "symbol": symbol,
                     "direction": idea.direction,
                     "confidence": confidence,
+                    "alert_mode": effective_alert_mode,
+                    "alert_label": alert_label,
+                    "window_label": window_label,
                     "expected_window": idea.expected_window,
                     "entry": idea.entry,
                     "stop": idea.stop,
@@ -733,10 +774,18 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         session.add(oc)
 
                 alerts_triggered.append(
-                    {"symbol": symbol, "direction": idea.direction, "confidence": confidence}
+                    {
+                        "symbol": symbol,
+                        "direction": idea.direction,
+                        "confidence": confidence,
+                        "alert_mode": effective_alert_mode,
+                        "alert_label": alert_label,
+                    }
                 )
                 if sent_success:
                     triggered_count += 1
+                if alert_label == "IDEA":
+                    idea_alerts_sent += 1
             except Exception as exc:  # noqa: BLE001
                 if not symbol_error_recorded:
                     symbol_error_recorded = True
