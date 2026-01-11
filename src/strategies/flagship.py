@@ -237,14 +237,23 @@ class FlagshipStrategy:
         window_label: str | None = None,
     ) -> Tuple[StockIdea | None, DecisionTrace]:
         settings = self.settings
+        lenient_mode = bool(getattr(settings, "DEBUG_LENIENT_MODE", False))
         trace = decision_trace or DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
         window = window_label or self._window_label(bars_raw[-1].get("ts") if bars_raw else None)
         min_bars_required = self.min_bars_for_window(window)
+        if lenient_mode:
+            min_bars_required = max(settings.BOX_BARS, int(min_bars_required * 0.7))
+            logger.warning(
+                "DEBUG_LENIENT_MODE enabled for strategy evaluation",
+                symbol=symbol,
+                window_label=window,
+            )
         trace.add_inputs(
             {
                 "bar_count": len(bars_raw),
                 "timezone": str(self.tz),
                 "window_label": window,
+                "lenient_mode": lenient_mode,
             }
         )
         trace.add_computed("min_bars_required", min_bars_required)
@@ -252,6 +261,13 @@ class FlagshipStrategy:
         def skip(reason: str, details: Dict[str, Any] | None = None) -> Tuple[StockIdea | None, DecisionTrace]:
             trace.record_gate(reason, passed=False, details=details)
             trace.mark_skip(reason, details)
+            logger.debug(
+                "strategy gate rejected",
+                symbol=symbol,
+                reason=reason,
+                details=details,
+                lenient_mode=lenient_mode,
+            )
             return None, trace
 
         if len(bars_raw) < min_bars_required:
@@ -285,24 +301,27 @@ class FlagshipStrategy:
             },
         )
         avg_vol = daily.get('avg_daily_volume') or daily.get('volume') or est_avg_volume
+        min_price = settings.MIN_PRICE * (0.8 if lenient_mode else 1.0)
+        max_price = settings.MAX_PRICE * (1.2 if lenient_mode else 1.0)
+        min_avg_volume = settings.MIN_AVG_DAILY_VOLUME * (0.25 if lenient_mode else 1.0)
         trace.add_inputs({
             "last_close": last_close,
             "avg_volume": avg_vol,
         })
         trace.add_computeds({
-            "min_price": settings.MIN_PRICE,
-            "max_price": settings.MAX_PRICE,
-            "min_avg_volume": settings.MIN_AVG_DAILY_VOLUME,
+            "min_price": min_price,
+            "max_price": max_price,
+            "min_avg_volume": min_avg_volume,
         })
-        if last_close < settings.MIN_PRICE:
-            return skip("price_below_min", {"last_close": last_close, "min_price": settings.MIN_PRICE})
-        if last_close > settings.MAX_PRICE:
-            return skip("price_above_max", {"last_close": last_close, "max_price": settings.MAX_PRICE})
+        if last_close < min_price:
+            return skip("price_below_min", {"last_close": last_close, "min_price": min_price})
+        if last_close > max_price:
+            return skip("price_above_max", {"last_close": last_close, "max_price": max_price})
         now_label = window
         min_required_volume = (
-            settings.MIN_AVG_DAILY_VOLUME
+            min_avg_volume
             if now_label == "RTH"
-            else settings.MIN_AVG_DAILY_VOLUME * 0.25
+            else min_avg_volume * 0.25
         )
         trace.add_computed("min_avg_volume", min_required_volume)
         if avg_vol <= 0:
@@ -323,6 +342,13 @@ class FlagshipStrategy:
                     "window_label": now_label,
                 },
             )
+        logger.debug(
+            "strategy volume gate passed",
+            symbol=symbol,
+            avg_volume=avg_vol,
+            min_required_volume=min_required_volume,
+            window_label=now_label,
+        )
 
         now = bars[-1].ts
         if now.tzinfo is None:
@@ -376,12 +402,13 @@ class FlagshipStrategy:
             "box_low": box_low,
             "range_pct": range_pct,
         })
-        if range_pct > settings.BOX_MAX_RANGE_PCT:
+        max_range_pct = settings.BOX_MAX_RANGE_PCT * (1.6 if lenient_mode else 1.0)
+        if range_pct > max_range_pct:
             return skip(
                 "box_range_too_wide",
                 {
                     "range_pct": range_pct,
-                    "max_range_pct": settings.BOX_MAX_RANGE_PCT,
+                    "max_range_pct": max_range_pct,
                 },
             )
 
@@ -392,22 +419,24 @@ class FlagshipStrategy:
         atr_mean_50 = sum(atr_series[-50:]) / len(atr_series[-50:]) if len(atr_series) >= 50 else sum(atr_series) / len(atr_series)
         atr_ratio = atr_current / atr_mean_50 if atr_mean_50 else 0
         trace.add_computeds({"atr_ratio": atr_ratio, "atr_mean_50": atr_mean_50})
-        if atr_ratio > settings.ATR_COMP_FACTOR:
+        atr_comp_factor = settings.ATR_COMP_FACTOR * (1.4 if lenient_mode else 1.0)
+        if atr_ratio > atr_comp_factor:
             return skip(
                 "atr_ratio_too_high",
-                {"atr_ratio": atr_ratio, "max_ratio": settings.ATR_COMP_FACTOR},
+                {"atr_ratio": atr_ratio, "max_ratio": atr_comp_factor},
             )
 
         avg_vol_box = sum(b.volume for b in box) / len(box)
         avg_vol_prior = sum(b.volume for b in prior_box) / len(prior_box) if prior_box else avg_vol_box
         vol_ratio = avg_vol_box / avg_vol_prior if avg_vol_prior else 1
         trace.add_computeds({"vol_ratio": vol_ratio, "avg_vol_box": avg_vol_box, "avg_vol_prior": avg_vol_prior})
-        if vol_ratio > settings.VOL_CONTRACTION_FACTOR:
+        vol_contraction_factor = settings.VOL_CONTRACTION_FACTOR + (0.2 if lenient_mode else 0.0)
+        if vol_ratio > vol_contraction_factor:
             return skip(
                 "volume_not_contracting",
                 {
                     "vol_ratio": vol_ratio,
-                    "max_vol_ratio": settings.VOL_CONTRACTION_FACTOR,
+                    "max_vol_ratio": vol_contraction_factor,
                 },
             )
 
@@ -428,20 +457,41 @@ class FlagshipStrategy:
             "breakout_pct": breakout_pct,
         })
 
+        break_buffer_pct = settings.BREAK_BUFFER_PCT * (0.5 if lenient_mode else 1.0)
+        break_vol_threshold = settings.BREAK_VOL_MULT * (0.6 if lenient_mode else 1.0)
+        max_extension_pct = settings.MAX_EXTENSION_PCT * (1.8 if lenient_mode else 1.0)
+        vwap_confirm = settings.VWAP_CONFIRM and not lenient_mode
+
         direction = None
-        if last_close >= box_high * (1 + settings.BREAK_BUFFER_PCT) and break_vol_mult >= settings.BREAK_VOL_MULT and last_close <= box_high * (1 + settings.MAX_EXTENSION_PCT):
-            if not settings.VWAP_CONFIRM or last_close > vwap_price:
+        if last_close >= box_high * (1 + break_buffer_pct) and break_vol_mult >= break_vol_threshold and last_close <= box_high * (1 + max_extension_pct):
+            if not vwap_confirm or last_close > vwap_price:
                 direction = 'LONG'
             else:
                 trace.mark_skip("vwap_not_confirmed")
-        if last_close <= box_low * (1 - settings.BREAK_BUFFER_PCT) and break_vol_mult >= settings.BREAK_VOL_MULT and last_close >= box_low * (1 - settings.MAX_EXTENSION_PCT):
-            if not settings.VWAP_CONFIRM or last_close < vwap_price:
+        if last_close <= box_low * (1 - break_buffer_pct) and break_vol_mult >= break_vol_threshold and last_close >= box_low * (1 - max_extension_pct):
+            if not vwap_confirm or last_close < vwap_price:
                 direction = 'SHORT'
             else:
                 trace.mark_skip("vwap_not_confirmed")
 
         if not direction:
-            return skip("no_breakout_direction")
+            if lenient_mode:
+                mid = (box_high + box_low) / 2
+                direction = "LONG" if last_close >= mid else "SHORT"
+                trace.record_gate(
+                    "lenient_direction_fallback",
+                    passed=True,
+                    details={"last_close": last_close, "midpoint": mid},
+                )
+                logger.debug(
+                    "lenient direction fallback",
+                    symbol=symbol,
+                    last_close=last_close,
+                    midpoint=mid,
+                    direction=direction,
+                )
+            else:
+                return skip("no_breakout_direction")
 
         vwap_ok = (last_close > vwap_price) if direction == 'LONG' else (last_close < vwap_price)
         entry = box_high * (1 + settings.ENTRY_BUFFER_PCT) if direction == 'LONG' else box_low * (1 - settings.ENTRY_BUFFER_PCT)
@@ -475,6 +525,17 @@ class FlagshipStrategy:
                 "vwap_ok": vwap_ok,
                 "score": confidence,
             }
+        )
+        logger.debug(
+            "strategy scored",
+            symbol=symbol,
+            direction=direction,
+            confidence=confidence,
+            break_vol_mult=break_vol_mult,
+            extension_pct=extension_pct,
+            vwap_ok=vwap_ok,
+            panic_penalty=panic_penalty,
+            lenient_mode=lenient_mode,
         )
         return (
             StockIdea(

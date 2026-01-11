@@ -101,6 +101,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         if dev_test_mode
         else settings.MIN_CONFIDENCE_TO_ALERT
     )
+    if settings.DEBUG_LENIENT_MODE:
+        effective_confidence_threshold = min(effective_confidence_threshold, 3.0)
+        logger.warning(
+            "DEBUG_LENIENT_MODE enabled, relaxed confidence threshold",
+            confidence_threshold=effective_confidence_threshold,
+            max_alerts=settings.DEBUG_MAX_ALERTS_PER_SCAN,
+        )
     skip_logs_emitted = 0
     skip_log_limit = float("inf") if debug_symbol else 15
     candidate_scores: List[Tuple[str, float, bool]] = []
@@ -109,6 +116,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     returned_early_guard = False
     market_symbol: str | None = None
     market_bars: List[Dict[str, Any]] = []
+    total_raw_signals = 0
 
     def reason_from_exception(exc: Exception) -> str:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -152,7 +160,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 
         scan_end_message = (
             f"scan end | duration_ms={duration_ms} scanned={scanned_count} "
-            f"triggered={triggered_count} errors={error_count} reason={effective_reason}"
+            f"candidates={total_raw_signals} triggered={triggered_count} "
+            f"errors={error_count} reason={effective_reason}"
         )
 
         if universe_count > 0 and scanned_count == 0:
@@ -518,6 +527,14 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     )
                     continue
 
+                raw_signal_count = 1
+                total_raw_signals += raw_signal_count
+                logger.info(
+                    "raw signals generated",
+                    symbol=symbol,
+                    raw_signal_count=raw_signal_count,
+                )
+
                 logger.info(
                     "strategy passed",
                     symbol=symbol,
@@ -629,6 +646,23 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                             inputs=trace.inputs,
                             computed=trace.computed,
                         )
+                    continue
+
+                if settings.DEBUG_LENIENT_MODE and triggered_count >= settings.DEBUG_MAX_ALERTS_PER_SCAN:
+                    trace.mark_skip(
+                        "lenient_max_alerts",
+                        {
+                            "triggered": triggered_count,
+                            "max_alerts": settings.DEBUG_MAX_ALERTS_PER_SCAN,
+                        },
+                    )
+                    skip_reasons["lenient_max_alerts"] += 1
+                    logger.warning(
+                        "lenient max alerts reached, suppressing signal",
+                        symbol=symbol,
+                        triggered=triggered_count,
+                        max_alerts=settings.DEBUG_MAX_ALERTS_PER_SCAN,
+                    )
                     continue
 
                 alert_label = "TRADE" if confidence >= settings.MIN_CONFIDENCE_TO_ALERT else "IDEA"
@@ -765,13 +799,21 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     telegram_response=tg_resp,
                 )
                 if db_persist_available:
-                    session.add(alert_row)
-                    session.flush()
-                    logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
+                    try:
+                        session.add(alert_row)
+                        session.flush()
+                        logger.info("alert persisted", symbol=symbol, alert_id=alert_row.id)
 
-                    for op in option_payloads:
-                        oc = OptionCandidate(alert_id=alert_row.id, **op)
-                        session.add(oc)
+                        for op in option_payloads:
+                            oc = OptionCandidate(alert_id=alert_row.id, **op)
+                            session.add(oc)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "alert persist failed",
+                            symbol=symbol,
+                            alert_id=getattr(alert_row, "id", None),
+                            error=str(exc),
+                        )
 
                 alerts_triggered.append(
                     {
@@ -867,6 +909,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 async def worker_loop() -> None:
     init_db()
     client = MassiveClient()
+    client.health_check()
     send_startup_test_alert(client, len(settings.universe_list()))
     while True:
         try:

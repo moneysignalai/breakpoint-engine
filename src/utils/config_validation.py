@@ -22,17 +22,19 @@ def validate_runtime_config(settings: Settings) -> None:
     if not settings.MASSIVE_API_KEY:
         raise RuntimeError("Missing MASSIVE_API_KEY")
 
-    if (
-        settings.DATA_PROVIDER.lower() != "polygon"
-        and "polygon.io" in settings.MASSIVE_API_BASE_URL
-        and settings.MASSIVE_BARS_PATH_TEMPLATE.startswith("/markets/")
-    ):
+    if settings.DATA_PROVIDER.lower() == "massive" and "polygon.io" in settings.MASSIVE_API_BASE_URL:
         logger.error(
             "Config mismatch: polygon base url with massive endpoints",
             base_url=settings.MASSIVE_API_BASE_URL,
             bars_path_template=settings.MASSIVE_BARS_PATH_TEMPLATE,
         )
         raise RuntimeError("Config mismatch: polygon base url with massive endpoints")
+
+    if settings.MASSIVE_API_BASE_URL.endswith("/"):
+        logger.warning(
+            "Massive base url has trailing slash; recommend removing for consistency",
+            base_url=settings.MASSIVE_API_BASE_URL,
+        )
 
     try:
         ZoneInfo(settings.TIMEZONE)

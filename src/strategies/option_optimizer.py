@@ -5,6 +5,8 @@ from datetime import datetime, time
 from typing import List
 from zoneinfo import ZoneInfo
 
+from loguru import logger
+
 from src.config import get_settings
 from src.utils.math import mid_price
 
@@ -75,13 +77,19 @@ class OptionOptimizer:
         return filtered or expirations[:3]
 
     def filter_contract(self, contract: OptionContract) -> bool:
+        lenient_mode = bool(getattr(settings, "DEBUG_LENIENT_MODE", False))
+        min_volume = settings.MIN_OPT_VOLUME * (0.5 if lenient_mode else 1.0)
+        min_oi = settings.MIN_OPT_OI * (0.5 if lenient_mode else 1.0)
+        min_mid = settings.MIN_OPT_MID * (0.5 if lenient_mode else 1.0)
+        spread_max = settings.SPREAD_PCT_MAX * (1.4 if lenient_mode else 1.0)
+
         if contract.bid <= 0 or contract.ask <= 0:
             return False
-        if contract.spread_pct > settings.SPREAD_PCT_MAX:
+        if contract.spread_pct > spread_max:
             return False
-        if contract.volume < settings.MIN_OPT_VOLUME and contract.oi < settings.MIN_OPT_OI:
+        if contract.volume < min_volume and contract.oi < min_oi:
             return False
-        if contract.mid < settings.MIN_OPT_MID:
+        if contract.mid < min_mid:
             return False
         return True
 
@@ -146,6 +154,13 @@ class OptionOptimizer:
                 all_candidates.append(contract)
 
         filtered = self.build_candidates(all_candidates)
+        logger.debug(
+            "option optimizer filter summary",
+            symbol=symbol,
+            total_contracts=len(all_candidates),
+            filtered_contracts=len(filtered),
+            lenient_mode=bool(getattr(settings, "DEBUG_LENIENT_MODE", False)),
+        )
         if not filtered:
             return OptionResult(stock_only=True, reason="No liquid contracts", candidates=[])
 
