@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     MIN_CONFIDENCE_TO_ALERT: float = 7.0
     TIMEZONE: str = "America/New_York"
 
-    MASSIVE_BARS_PATH_TEMPLATE: str = "/v1/markets/{symbol}/bars"
+    MASSIVE_BARS_PATH_TEMPLATE: str = "/v1/markets/{symbol}/bars"  # Legacy Massive bars path (unused).
 
     MIN_AVG_DAILY_VOLUME: int = 5_000_000
     MIN_PRICE: float = 10.0
