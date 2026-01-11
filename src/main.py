@@ -129,7 +129,11 @@ def massive_health(symbol: str = "SPY") -> Dict[str, Any]:
         bars = client.get_bars(upper_symbol, timeframe="5m", limit=settings.BOX_BARS * 3)
         response["bars_count"] = len(bars)
         if bars:
-            last_ts = bars[-1].get("t") or bars[-1].get("ts")
+            last_bar = bars[-1]
+            if isinstance(last_bar, dict):
+                last_ts = last_bar.get("t") or last_bar.get("ts")
+            else:
+                last_ts = getattr(last_bar, "ts", None)
             response["last_bar_timestamp"] = last_ts
     except Exception as exc:  # noqa: BLE001
         response["errors"].append({"stage": "bars", "error": str(exc)})

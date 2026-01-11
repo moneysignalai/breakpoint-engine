@@ -9,6 +9,7 @@ from src.models.alert import Alert
 from src.models.grade import Grade
 from src.services.db import session_scope
 from src.services.massive_client import MassiveClient
+from src.strategies.flagship import Bar
 
 settings = get_settings()
 
@@ -26,8 +27,12 @@ def compute_grade_for_alert(alert: Alert, client: MassiveClient) -> Grade:
     time_to_t2 = None
 
     for idx, bar in enumerate(bars):
-        high = bar.get('high')
-        low = bar.get('low')
+        if isinstance(bar, Bar):
+            high = bar.high
+            low = bar.low
+        else:
+            high = bar.get('high')
+            low = bar.get('low')
         if alert.direction == 'LONG':
             mfe = max(mfe, (high - entry) / entry)
             mae = min(mae, (low - entry) / entry)
