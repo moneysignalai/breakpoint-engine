@@ -2,23 +2,19 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping
-from zoneinfo import ZoneInfo
 
 import httpx
 from loguru import logger
 
 from src.config import get_settings
+from src.strategies.flagship import Bar
 
 settings = get_settings()
 
 
-class MassiveNotFoundError(Exception):
-    """Raised when Massive returns a 404 for a given resource."""
-
-
-class MassiveHTTPError(Exception):
+class MassiveAPIError(Exception):
     """Raised when Massive returns a non-200 response."""
 
     def __init__(self, message: str, *, status_code: int, url: str, response: httpx.Response | None = None):
@@ -28,6 +24,10 @@ class MassiveHTTPError(Exception):
         self.response = response
 
 
+class MassiveNotFoundError(MassiveAPIError):
+    """Raised when Massive returns a 404 for a given resource."""
+
+
 class MassiveClient:
     def __init__(self, api_key: str | None = None, timeout: float = 10.0):
         self.api_key = api_key or settings.MASSIVE_API_KEY
@@ -35,10 +35,7 @@ class MassiveClient:
         self.provider = (settings.DATA_PROVIDER or "polygon").lower()
         self.base_url, self.base_url_source = self._resolve_base_url()
         self.bars_path_template = settings.MASSIVE_BARS_PATH_TEMPLATE
-        self.client = httpx.Client(
-            timeout=httpx.Timeout(timeout, connect=timeout, read=timeout),
-            headers=self._auth_headers(),
-        )
+        self.client = httpx.Client(timeout=httpx.Timeout(timeout, connect=timeout, read=timeout))
         if self.provider == "polygon" and "polygon" not in self.base_url:
             logger.warning(
                 "provider/base_url mismatch",
@@ -63,27 +60,34 @@ class MassiveClient:
             return (settings.MASSIVE_API_BASE_URL or "https://api.massive.com").rstrip("/"), "default"
         return (settings.MASSIVE_API_BASE_URL or "https://api.massive.com").rstrip("/"), "default"
 
-    def _auth_headers(self) -> Mapping[str, str]:
-        if not self.api_key:
-            return {}
-        return {"X-API-KEY": self.api_key}
-
     def _safe_params(self, params: Mapping[str, Any] | None) -> Dict[str, Any]:
         safe_params = dict(params or {})
         for key in ("apiKey", "apikey", "api_key", "x-api-key", "token"):
             safe_params.pop(key, None)
         return safe_params
 
-    def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        params: dict | None = None,
+        *,
+        symbol: str | None = None,
+        run_id: str | None = None,
+        raise_for_status: bool = False,
+    ) -> Any:
         backoff = 1.0
         url = path if path.startswith("http") else f"{self.base_url}{path}"
         endpoint = path if path.startswith("/") else path.replace(self.base_url, "")
         retryable_status = {429, 500, 502, 503, 504}
         max_attempts = 3
+        request_params = dict(params or {})
+        if self.api_key:
+            request_params.setdefault("apiKey", self.api_key)
         for attempt in range(max_attempts):
             start = time.perf_counter()
             try:
-                response = self.client.request(method, url, params=params)
+                response = self.client.request(method, url, params=request_params)
             except httpx.RequestError as exc:
                 elapsed_ms = int((time.perf_counter() - start) * 1000)
                 logger.warning(
@@ -91,9 +95,11 @@ class MassiveClient:
                     provider=self.provider,
                     path=endpoint,
                     url=url,
+                    params=self._safe_params(request_params) or None,
                     symbol=symbol,
                     elapsed_ms=elapsed_ms,
                     error=str(exc),
+                    run_id=run_id,
                     attempt=attempt + 1,
                 )
                 if attempt < max_attempts - 1:
@@ -106,7 +112,7 @@ class MassiveClient:
             status_code = response.status_code
             snippet = (response.text or "")[:500]
             full_url = str(response.request.url) if response.request else url
-            safe_params = self._safe_params(params)
+            safe_params = self._safe_params(request_params)
 
             if status_code == 404:
                 logger.warning(
@@ -120,7 +126,15 @@ class MassiveClient:
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     body_snippet=snippet,
+                    run_id=run_id,
                 )
+                if raise_for_status:
+                    raise MassiveNotFoundError(
+                        "Massive request failed with 404",
+                        status_code=status_code,
+                        url=full_url,
+                        response=response,
+                    )
                 return None
 
             if status_code in retryable_status and attempt < max_attempts - 1:
@@ -134,6 +148,7 @@ class MassiveClient:
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     body_snippet=snippet,
+                    run_id=run_id,
                     attempt=attempt + 1,
                 )
                 time.sleep(backoff)
@@ -152,7 +167,15 @@ class MassiveClient:
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     body_snippet=snippet,
+                    run_id=run_id,
                 )
+                if raise_for_status:
+                    raise MassiveAPIError(
+                        "Massive request failed",
+                        status_code=status_code,
+                        url=full_url,
+                        response=response,
+                    )
                 if 400 <= status_code < 500:
                     return None
                 if status_code in retryable_status and attempt < max_attempts - 1:
@@ -166,6 +189,7 @@ class MassiveClient:
                 symbol=symbol,
                 status_code=status_code,
                 elapsed_ms=elapsed_ms,
+                run_id=run_id,
             )
             try:
                 return response.json()
@@ -178,7 +202,15 @@ class MassiveClient:
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     response_snippet=snippet,
+                    run_id=run_id,
                 )
+                if raise_for_status:
+                    raise MassiveAPIError(
+                        "Massive response was not JSON",
+                        status_code=status_code,
+                        url=full_url,
+                        response=response,
+                    )
                 return None
         return None
 
@@ -193,98 +225,51 @@ class MassiveClient:
                     return value
         return []
 
-    def get_bars(self, symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
-        multiplier, timespan = self._timeframe_to_range(timeframe)
-        ny_tz = ZoneInfo("America/New_York")
-        now = datetime.now(ny_tz)
-        approx_minutes = limit * multiplier
-        from_dt = now - timedelta(minutes=approx_minutes * 2)
-        to_dt = now
-        to_date = to_dt.date().isoformat()
+    @staticmethod
+    def _ts_ms_to_dt(ts_ms: int) -> datetime:
+        return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
 
-        def normalize_bars(raw: List[Dict[str, Any]] | Dict[str, Any]) -> List[Dict[str, Any]]:
-            raw_bars = self._extract_list(raw, ("results", "data", "bars", "candles"))
-            normalized: List[Dict[str, Any]] = []
-            for bar in raw_bars or []:
-                normalized_bar = dict(bar)
-                normalized_bar.setdefault("t", bar.get("t") or bar.get("timestamp") or bar.get("ts"))
-                normalized_bar.setdefault("o", bar.get("o") or bar.get("open"))
-                normalized_bar.setdefault("h", bar.get("h") or bar.get("high"))
-                normalized_bar.setdefault("l", bar.get("l") or bar.get("low"))
-                normalized_bar.setdefault("c", bar.get("c") or bar.get("close"))
-                normalized_bar.setdefault("v", bar.get("v") or bar.get("volume"))
-                normalized.append(normalized_bar)
-            return normalized
+    def get_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+        adjusted: bool = True,
+        run_id: str | None = None,
+    ) -> List[Bar]:
+        if timeframe != "5m":
+            raise ValueError(f"Unsupported timeframe={timeframe!r}; only '5m' is implemented")
 
-        def _ts_key(bar: Dict[str, Any]) -> Any:
-            ts = bar.get("t") or bar.get("ts") or bar.get("timestamp")
-            if isinstance(ts, datetime):
-                return ts
-            if isinstance(ts, str):
-                try:
-                    return datetime.fromisoformat(ts)
-                except Exception:  # noqa: BLE001
-                    return ts
-            return ts or 0
+        multiplier = 5
+        timespan = "minute"
+        now = datetime.now(timezone.utc)
+        from_dt = now - timedelta(days=5)
+        from_date = from_dt.date().isoformat()
+        to_date = now.date().isoformat()
 
-        def fetch_polygon_bars(from_date: str, api_limit: int) -> List[Dict[str, Any]]:
-            path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-            params = {"adjusted": True, "sort": "desc", "limit": api_limit}
-            data = self._request(
-                "GET",
-                path,
-                params=params,
-                symbol=symbol,
+        path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+        params = {
+            "adjusted": "true" if adjusted else "false",
+            "sort": "asc",
+            "limit": limit * 4,
+        }
+
+        data = self._request("GET", path, params=params, symbol=symbol, run_id=run_id)
+        results = data.get("results") if isinstance(data, dict) else None
+        bars: List[Bar] = []
+        for r in results or []:
+            bars.append(
+                Bar(
+                    ts=self._ts_ms_to_dt(r["t"]),
+                    open=r["o"],
+                    high=r["h"],
+                    low=r["l"],
+                    close=r["c"],
+                    volume=r["v"],
+                )
             )
-            bars = normalize_bars(data)
-            sorted_bars = sorted(bars, key=_ts_key)
-            from_dt_parsed = datetime.fromisoformat(from_date).date()
-            to_dt_parsed = datetime.fromisoformat(to_date).date()
-            requested_range_days = (to_dt_parsed - from_dt_parsed).days + 1
-            sliced = sorted_bars[-limit:]
-            logger.info(
-                "bars fetched | symbol={symbol} provider={provider} timeframe={tf} "
-                "requested={requested} raw_returned={raw_returned} "
-                "final_returned={final_returned} from={from_date} to={to_date} "
-                "requested_range_days={requested_range_days}",
-                symbol=symbol,
-                provider=self.provider,
-                tf=timeframe,
-                requested=limit,
-                raw_returned=len(sorted_bars),
-                final_returned=len(sliced),
-                from_date=from_date,
-                to_date=to_date,
-                requested_range_days=requested_range_days,
-            )
-            return sorted_bars
 
-        if self.provider in {"polygon", "massive"}:
-            min_bars_setting = getattr(settings, "MIN_BARS", limit)
-            desired_min = min(limit, max(min_bars_setting, 10))
-            api_limit = max(limit * 3, limit)
-            lookbacks = [0, 2, 5, 10]
-            attempt_dates = []
-            for days in lookbacks:
-                attempt_dt = from_dt - timedelta(days=days)
-                attempt_dates.append(attempt_dt.date().isoformat())
-
-            bars: List[Dict[str, Any]] = []
-            for attempt_from_date in dict.fromkeys(attempt_dates):
-                bars = fetch_polygon_bars(attempt_from_date, api_limit)
-                if len(bars) >= desired_min:
-                    break
-
-            return bars[-limit:]
-
-        raise ValueError(f"Unsupported provider for get_bars: {self.provider}")
-
-    def _timeframe_to_range(self, timeframe: str) -> tuple[int, str]:
-        if timeframe == "1m":
-            return 1, "minute"
-        if timeframe == "5m":
-            return 5, "minute"
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
+        return bars[-limit:]
 
     def get_daily_snapshot(self, symbol: str) -> Dict[str, Any]:
         if self.provider == "polygon":
@@ -334,8 +319,8 @@ class MassiveClient:
         return snapshot
 
     def get_quote(self, symbol: str) -> Dict[str, Any]:
-        path = f"/v1/markets/{symbol}/quote" if self.provider == "massive" else f"/v2/last/trade/{symbol}"
-        data = self._request("GET", path, symbol=symbol)
+        path = f"/v3/snapshot/stocks/{symbol}"
+        data = self._request("GET", path, symbol=symbol, raise_for_status=True)
         return data or {}
 
     def get_option_expirations(self, symbol: str) -> List[str]:
@@ -433,7 +418,7 @@ class MassiveClient:
 
         return contracts
 
-    def health_check(self, symbol: str = "SPY") -> bool:
+    def health_check(self, symbol: str = "SPY") -> Dict[str, Any]:
         symbol = symbol.upper()
         logger.info(
             "Massive health check",
@@ -443,6 +428,16 @@ class MassiveClient:
         )
         try:
             quote = self.get_quote(symbol)
+        except MassiveAPIError as exc:
+            logger.warning(
+                "Massive health check failed",
+                provider=self.provider,
+                base_url=self.base_url,
+                symbol=symbol,
+                status_code=exc.status_code,
+                error=str(exc),
+            )
+            return {"ok": False, "status_code": exc.status_code, "message": str(exc)}
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Massive health check failed",
@@ -451,7 +446,7 @@ class MassiveClient:
                 symbol=symbol,
                 error=str(exc),
             )
-            return False
+            return {"ok": False, "status_code": None, "message": str(exc)}
 
         ok = bool(quote)
         logger.info(
@@ -461,7 +456,7 @@ class MassiveClient:
             symbol=symbol,
             ok=ok,
         )
-        return ok
+        return {"ok": ok, "status_code": 200 if ok else None, "message": "ok" if ok else "empty response"}
 
     def close(self) -> None:
         self.client.close()

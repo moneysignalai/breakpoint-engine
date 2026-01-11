@@ -21,7 +21,7 @@ from src.services import alerts as alert_service
 from src.services.db import session_scope, init_db
 from src.services.market_time import parse_windows
 from src.services.massive_client import MassiveClient, MassiveNotFoundError
-from src.strategies.flagship import FlagshipStrategy
+from src.strategies.flagship import Bar, FlagshipStrategy
 from src.strategies.option_optimizer import OptionOptimizer, OptionPick, OptionResult
 from src.utils.config_validation import validate_runtime_config
 from src.utils.decision_trace import DecisionTrace
@@ -115,8 +115,13 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     symbol_traces: List[Tuple[str, DecisionTrace]] = []
     returned_early_guard = False
     market_symbol: str | None = None
-    market_bars: List[Dict[str, Any]] = []
+    market_bars: List[Bar | Dict[str, Any]] = []
     total_raw_signals = 0
+
+    def bar_volume(bar: Bar | Dict[str, Any]) -> float:
+        if isinstance(bar, Bar):
+            return bar.volume
+        return bar.get("v") or bar.get("volume") or 0
 
     def reason_from_exception(exc: Exception) -> str:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -342,7 +347,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             )
 
             market_symbol = "QQQ"
-            market_bars: List[Dict[str, Any]] = []
+            market_bars: List[Bar | Dict[str, Any]] = []
             try:
                 market_bars_start = time.perf_counter()
                 market_bars = client.get_bars(
@@ -415,7 +420,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             symbol_error_recorded = False
             try:
                 bars_start = time.perf_counter()
-                bars: List[Dict[str, Any]] = []
+                bars: List[Bar | Dict[str, Any]] = []
                 requested_limit = settings.BOX_BARS * 3
                 try:
                     bars = client.get_bars(
@@ -477,9 +482,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     fallback_bars_count = min(len(bars), 78) if bars else 0
                     fallback_bars_count = min(fallback_bars_count or len(bars), 100)
                     bars_raw_tail = bars[-fallback_bars_count:]
-                    bars_total_volume = sum(
-                        (bar.get("v") or bar.get("volume") or 0) for bar in bars_raw_tail
-                    )
+                    bars_total_volume = sum(bar_volume(bar) for bar in bars_raw_tail)
                     est_avg_daily_volume = max(bars_total_volume, 1) * 3
                     daily = {
                         "avg_daily_volume": est_avg_daily_volume,
@@ -909,7 +912,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
 async def worker_loop() -> None:
     init_db()
     client = MassiveClient()
-    client.health_check()
+    health = client.health_check()
+    logger.info("Massive health check result", result=health)
     send_startup_test_alert(client, len(settings.universe_list()))
     while True:
         try:

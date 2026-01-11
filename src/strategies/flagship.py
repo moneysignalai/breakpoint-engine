@@ -37,12 +37,30 @@ class StockIdea:
     debug: Dict[str, Any]
 
 
-def _to_bars(raw: List[Dict[str, Any]], symbol: str | None = None) -> List[Bar]:
+def _to_bars(raw: List[Dict[str, Any] | Bar], symbol: str | None = None) -> List[Bar]:
     bars: List[Bar] = []
     tz_ny = ZoneInfo("America/New_York")
     missing_logged = False
 
     for b in raw:
+        if isinstance(b, Bar):
+            ts = b.ts
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=tz_ny)
+            else:
+                ts = ts.astimezone(tz_ny)
+            bars.append(
+                Bar(
+                    ts=ts,
+                    open=b.open,
+                    high=b.high,
+                    low=b.low,
+                    close=b.close,
+                    volume=b.volume,
+                )
+            )
+            continue
+
         open_val = b.get("open", b.get("o"))
         high_val = b.get("high", b.get("h"))
         low_val = b.get("low", b.get("l"))
@@ -230,16 +248,23 @@ class FlagshipStrategy:
     def evaluate(
         self,
         symbol: str,
-        bars_raw: List[Dict[str, Any]],
+        bars_raw: List[Dict[str, Any] | Bar],
         daily: Dict[str, Any] | None,
-        market_bars: List[Dict[str, Any]],
+        market_bars: List[Dict[str, Any] | Bar],
         decision_trace: DecisionTrace | None = None,
         window_label: str | None = None,
     ) -> Tuple[StockIdea | None, DecisionTrace]:
         settings = self.settings
         lenient_mode = bool(getattr(settings, "DEBUG_LENIENT_MODE", False))
         trace = decision_trace or DecisionTrace(symbol=symbol, strategy="FlagshipStrategy")
-        window = window_label or self._window_label(bars_raw[-1].get("ts") if bars_raw else None)
+        last_ts = None
+        if bars_raw:
+            last_bar = bars_raw[-1]
+            if isinstance(last_bar, Bar):
+                last_ts = last_bar.ts
+            else:
+                last_ts = last_bar.get("ts")
+        window = window_label or self._window_label(last_ts)
         min_bars_required = self.min_bars_for_window(window)
         if lenient_mode:
             min_bars_required = max(settings.BOX_BARS, int(min_bars_required * 0.7))
