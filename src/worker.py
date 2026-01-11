@@ -657,7 +657,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 option_picks: List[OptionPick] = []
                 if opt_result.stock_only:
                     confidence = max(0.0, confidence - 1.0)
-                    idea.debug["debug_reasons"].append(
+                    if getattr(idea, "debug", None) is None:
+                        idea.debug = {}
+                    idea.debug.setdefault("debug_reasons", []).append(
                         opt_result.reason or "stock-only"
                     )
                 else:
