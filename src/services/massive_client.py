@@ -52,20 +52,22 @@ class MassiveClient:
         env_alias_base = os.getenv("MASSIVE_BASE_URL")
 
         if settings.BASE_URL:
-            return settings.BASE_URL, "BASE_URL"
+            return settings.BASE_URL.rstrip("/"), "BASE_URL"
         if self.provider == "polygon":
             if env_api_base:
-                return env_api_base, "MASSIVE_API_BASE_URL"
+                return env_api_base.rstrip("/"), "MASSIVE_API_BASE_URL"
             if env_alias_base:
-                return env_alias_base, "MASSIVE_BASE_URL"
-            return settings.MASSIVE_API_BASE_URL or "https://api.polygon.io", "default"
+                return env_alias_base.rstrip("/"), "MASSIVE_BASE_URL"
+            if settings.MASSIVE_API_BASE_URL and "polygon" in settings.MASSIVE_API_BASE_URL:
+                return settings.MASSIVE_API_BASE_URL.rstrip("/"), "MASSIVE_API_BASE_URL"
+            return "https://api.polygon.io", "default"
         if self.provider == "massive":
             if env_api_base:
-                return env_api_base, "MASSIVE_API_BASE_URL"
+                return env_api_base.rstrip("/"), "MASSIVE_API_BASE_URL"
             if env_alias_base:
-                return env_alias_base, "MASSIVE_BASE_URL"
-            return settings.MASSIVE_API_BASE_URL or "https://api.massive.com", "default"
-        return settings.MASSIVE_API_BASE_URL or "https://api.polygon.io", "default"
+                return env_alias_base.rstrip("/"), "MASSIVE_BASE_URL"
+            return (settings.MASSIVE_API_BASE_URL or "https://api.massive.com").rstrip("/"), "default"
+        return (settings.MASSIVE_API_BASE_URL or "https://api.massive.com").rstrip("/"), "default"
 
     def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
         backoff = 1.0
@@ -79,8 +81,9 @@ class MassiveClient:
                 response = self.client.request(method, url, params=params)
             except httpx.RequestError as exc:
                 elapsed_ms = int((time.perf_counter() - start) * 1000)
-                logger.error(
+                logger.warning(
                     "Massive request error",
+                    provider=self.provider,
                     path=endpoint,
                     symbol=symbol,
                     elapsed_ms=elapsed_ms,
@@ -91,21 +94,22 @@ class MassiveClient:
                     time.sleep(backoff)
                     backoff *= 2
                     continue
-                raise
+                return None
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
             snippet = (response.text or "")[:300]
             full_url = str(response.request.url) if response.request else url
+            safe_params = dict(params or {})
+            safe_params.pop("apiKey", None)
+            safe_params.pop("apikey", None)
+            safe_params.pop("api_key", None)
 
             if status_code == 404:
-                safe_params = dict(params or {})
-                safe_params.pop("apiKey", None)
-                safe_params.pop("apikey", None)
-                safe_params.pop("api_key", None)
                 logger.warning(
                     "Massive request 404",
                     method=method,
+                    provider=self.provider,
                     path=endpoint,
                     url=full_url,
                     params=safe_params or None,
@@ -114,15 +118,13 @@ class MassiveClient:
                     elapsed_ms=elapsed_ms,
                     response_snippet=snippet,
                 )
-                err = MassiveNotFoundError(f"{method} {path} returned 404")
-                err.request = response.request
-                err.response = response
-                raise err
+                return None
 
             if status_code in retryable_status and attempt < max_attempts - 1:
                 logger.warning(
                     "Massive request retryable",
                     method=method,
+                    provider=self.provider,
                     path=endpoint,
                     url=full_url,
                     symbol=symbol,
@@ -135,15 +137,12 @@ class MassiveClient:
                 backoff *= 2
                 continue
 
-            if status_code != 200:
-                safe_params = dict(params or {})
-                safe_params.pop("apiKey", None)
-                safe_params.pop("apikey", None)
-                safe_params.pop("api_key", None)
+            if status_code < 200 or status_code >= 300:
                 logger.error(
                     "massive_http_error",
                     error_code="massive_http_error",
                     method=method,
+                    provider=self.provider,
                     url=full_url,
                     params=safe_params or None,
                     symbol=symbol,
@@ -151,12 +150,11 @@ class MassiveClient:
                     elapsed_ms=elapsed_ms,
                     response_snippet=snippet,
                 )
-                raise MassiveHTTPError(
-                    f"{status_code} from {method} {full_url}",
-                    status_code=status_code,
-                    url=full_url,
-                    response=response,
-                )
+                if 400 <= status_code < 500:
+                    return None
+                if status_code in retryable_status and attempt < max_attempts - 1:
+                    continue
+                return None
 
             logger.debug(
                 "Massive request ok",
@@ -165,8 +163,20 @@ class MassiveClient:
                 status_code=status_code,
                 elapsed_ms=elapsed_ms,
             )
-            return response.json()
-        raise RuntimeError("Unreachable")
+            try:
+                return response.json()
+            except ValueError:
+                logger.warning(
+                    "Massive response non-json",
+                    provider=self.provider,
+                    path=endpoint,
+                    symbol=symbol,
+                    status_code=status_code,
+                    elapsed_ms=elapsed_ms,
+                    response_snippet=snippet,
+                )
+                return None
+        return None
 
     def get_bars(self, symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
         multiplier, timespan = self._timeframe_to_range(timeframe)
@@ -264,23 +274,26 @@ class MassiveClient:
 
         last_bars: List[Dict[str, Any]] = []
         for idx, attempt_days in enumerate(attempts):
-            try:
-                data = self._request(
-                    "GET",
-                    path,
-                    params={
-                        "timeframe": timeframe,
-                        "limit": limit,
-                        "days": attempt_days,
-                        "session": session,
-                    },
+            data = self._request(
+                "GET",
+                path,
+                params={
+                    "timeframe": timeframe,
+                    "limit": limit,
+                    "days": attempt_days,
+                    "session": session,
+                },
+                symbol=symbol,
+            )
+            if data is None:
+                logger.warning(
+                    "bars fetch returned no data",
+                    provider=self.provider,
                     symbol=symbol,
+                    days=attempt_days,
+                    path=path,
                 )
-            except Exception:
-                logger.error(
-                    "bars fetch failed", provider=self.provider, symbol=symbol, days=attempt_days
-                )
-                raise
+                return []
 
             last_bars = normalize_bars(data)
             returned = len(last_bars)
@@ -333,6 +346,8 @@ class MassiveClient:
             symbol=symbol,
         )
 
+        if data is None:
+            return {"avg_daily_volume": None, "volume": None, "iv_percentile": None, "raw": None}
         if not isinstance(data, dict):
             return {"avg_daily_volume": None, "volume": None, "iv_percentile": None, "raw": data}
 
@@ -364,7 +379,8 @@ class MassiveClient:
         return snapshot
 
     def get_quote(self, symbol: str) -> Dict[str, Any]:
-        return self._request("GET", f"/markets/{symbol}/quote", symbol=symbol)
+        data = self._request("GET", f"/markets/{symbol}/quote", symbol=symbol)
+        return data or {}
 
     def get_option_expirations(self, symbol: str) -> List[str]:
         path = "/v3/reference/options/contracts"
@@ -381,6 +397,8 @@ class MassiveClient:
 
         while next_path:
             data = self._request("GET", next_path, params=next_params, symbol=symbol)
+            if not data:
+                break
             for contract in data.get("results", []) or []:
                 exp = contract.get("expiration_date")
                 if exp:
@@ -411,6 +429,8 @@ class MassiveClient:
 
         while next_path:
             data = self._request("GET", next_path, params=next_params, symbol=symbol)
+            if not data:
+                break
             for contract in data.get("results", []) or []:
                 contracts.append(
                     {
@@ -430,6 +450,36 @@ class MassiveClient:
                 next_path = None
 
         return contracts
+
+    def health_check(self, symbol: str = "SPY") -> bool:
+        symbol = symbol.upper()
+        logger.info(
+            "Massive health check",
+            provider=self.provider,
+            base_url=self.base_url,
+            symbol=symbol,
+        )
+        try:
+            quote = self.get_quote(symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Massive health check failed",
+                provider=self.provider,
+                base_url=self.base_url,
+                symbol=symbol,
+                error=str(exc),
+            )
+            return False
+
+        ok = bool(quote)
+        logger.info(
+            "Massive health check result",
+            provider=self.provider,
+            base_url=self.base_url,
+            symbol=symbol,
+            ok=ok,
+        )
+        return ok
 
     def close(self) -> None:
         self.client.close()

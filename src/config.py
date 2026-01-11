@@ -11,10 +11,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", case_sensitive=False)
 
     MASSIVE_API_KEY: str
-    DATA_PROVIDER: str = "polygon"
+    DATA_PROVIDER: str = "massive"
     BASE_URL: str | None = None
     MASSIVE_API_BASE_URL: str = Field(
-        default="https://api.polygon.io",
+        default="https://api.massive.com",
         validation_alias=AliasChoices("MASSIVE_API_BASE_URL", "MASSIVE_BASE_URL"),
     )
     DATABASE_URL: str
@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str | None = None
     DEBUG_MODE: bool = False
     DEBUG_SYMBOL: str | None = None
+    DEBUG_LENIENT_MODE: bool = False
+    DEBUG_MAX_ALERTS_PER_SCAN: int = 5
     DEV_TEST_MODE: bool = False
     TEST_ALERT_ON_START: bool = False
     SCAN_INTERVAL_SECONDS: int = 60
@@ -30,7 +32,7 @@ class Settings(BaseSettings):
     RTH_ONLY: bool = True
     SCAN_OUTSIDE_WINDOW: bool = False
     ALERT_MODE: str = "TRADE"
-    MIN_CONFIDENCE_TO_ALERT: float = 7.5
+    MIN_CONFIDENCE_TO_ALERT: float = 7.0
     TIMEZONE: str = "America/New_York"
 
     MASSIVE_BARS_PATH_TEMPLATE: str = "/markets/{symbol}/bars"

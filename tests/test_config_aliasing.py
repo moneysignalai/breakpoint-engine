@@ -26,7 +26,7 @@ def test_massive_base_url_alias_used_when_primary_missing(monkeypatch: pytest.Mo
     get_settings.cache_clear()
 
 
-def test_massive_base_url_defaults_to_polygon(monkeypatch: pytest.MonkeyPatch):
+def test_massive_base_url_defaults_to_massive(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("MASSIVE_API_BASE_URL", raising=False)
     monkeypatch.delenv("MASSIVE_BASE_URL", raising=False)
     monkeypatch.delenv("BASE_URL", raising=False)
@@ -34,5 +34,5 @@ def test_massive_base_url_defaults_to_polygon(monkeypatch: pytest.MonkeyPatch):
 
     settings = get_settings()
 
-    assert settings.MASSIVE_API_BASE_URL == "https://api.polygon.io"
+    assert settings.MASSIVE_API_BASE_URL == "https://api.massive.com"
     get_settings.cache_clear()
