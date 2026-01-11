@@ -4,7 +4,7 @@ import math
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -38,7 +38,7 @@ class MassiveClient:
         self.bars_path_template = settings.MASSIVE_BARS_PATH_TEMPLATE
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout, connect=timeout, read=timeout),
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            headers=self._auth_headers(),
         )
         if self.provider == "polygon" and "polygon" not in self.base_url:
             logger.warning(
@@ -49,25 +49,31 @@ class MassiveClient:
 
     def _resolve_base_url(self) -> tuple[str, str]:
         env_api_base = os.getenv("MASSIVE_API_BASE_URL")
-        env_alias_base = os.getenv("MASSIVE_BASE_URL")
 
         if settings.BASE_URL:
             return settings.BASE_URL.rstrip("/"), "BASE_URL"
         if self.provider == "polygon":
             if env_api_base:
                 return env_api_base.rstrip("/"), "MASSIVE_API_BASE_URL"
-            if env_alias_base:
-                return env_alias_base.rstrip("/"), "MASSIVE_BASE_URL"
             if settings.MASSIVE_API_BASE_URL and "polygon" in settings.MASSIVE_API_BASE_URL:
                 return settings.MASSIVE_API_BASE_URL.rstrip("/"), "MASSIVE_API_BASE_URL"
             return "https://api.polygon.io", "default"
         if self.provider == "massive":
             if env_api_base:
                 return env_api_base.rstrip("/"), "MASSIVE_API_BASE_URL"
-            if env_alias_base:
-                return env_alias_base.rstrip("/"), "MASSIVE_BASE_URL"
             return (settings.MASSIVE_API_BASE_URL or "https://api.massive.com").rstrip("/"), "default"
         return (settings.MASSIVE_API_BASE_URL or "https://api.massive.com").rstrip("/"), "default"
+
+    def _auth_headers(self) -> Mapping[str, str]:
+        if not self.api_key:
+            return {}
+        return {"X-API-KEY": self.api_key}
+
+    def _safe_params(self, params: Mapping[str, Any] | None) -> Dict[str, Any]:
+        safe_params = dict(params or {})
+        for key in ("apiKey", "apikey", "api_key", "x-api-key", "token"):
+            safe_params.pop(key, None)
+        return safe_params
 
     def _request(self, method: str, path: str, params: dict | None = None, *, symbol: str | None = None) -> Any:
         backoff = 1.0
@@ -85,6 +91,7 @@ class MassiveClient:
                     "Massive request error",
                     provider=self.provider,
                     path=endpoint,
+                    url=url,
                     symbol=symbol,
                     elapsed_ms=elapsed_ms,
                     error=str(exc),
@@ -98,16 +105,13 @@ class MassiveClient:
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             status_code = response.status_code
-            snippet = (response.text or "")[:300]
+            snippet = (response.text or "")[:500]
             full_url = str(response.request.url) if response.request else url
-            safe_params = dict(params or {})
-            safe_params.pop("apiKey", None)
-            safe_params.pop("apikey", None)
-            safe_params.pop("api_key", None)
+            safe_params = self._safe_params(params)
 
             if status_code == 404:
                 logger.warning(
-                    "Massive request 404",
+                    "Massive request failed",
                     method=method,
                     provider=self.provider,
                     path=endpoint,
@@ -116,7 +120,7 @@ class MassiveClient:
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
-                    response_snippet=snippet,
+                    body_snippet=snippet,
                 )
                 return None
 
@@ -130,7 +134,7 @@ class MassiveClient:
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
-                    response_snippet=snippet,
+                    body_snippet=snippet,
                     attempt=attempt + 1,
                 )
                 time.sleep(backoff)
@@ -139,7 +143,7 @@ class MassiveClient:
 
             if status_code < 200 or status_code >= 300:
                 logger.error(
-                    "massive_http_error",
+                    "Massive request failed",
                     error_code="massive_http_error",
                     method=method,
                     provider=self.provider,
@@ -148,7 +152,7 @@ class MassiveClient:
                     symbol=symbol,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
-                    response_snippet=snippet,
+                    body_snippet=snippet,
                 )
                 if 400 <= status_code < 500:
                     return None
@@ -158,6 +162,7 @@ class MassiveClient:
 
             logger.debug(
                 "Massive request ok",
+                method=method,
                 path=endpoint,
                 symbol=symbol,
                 status_code=status_code,
@@ -178,6 +183,17 @@ class MassiveClient:
                 return None
         return None
 
+    @staticmethod
+    def _extract_list(payload: Any, keys: tuple[str, ...]) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
     def get_bars(self, symbol: str, timeframe: str, limit: int) -> List[Dict[str, Any]]:
         multiplier, timespan = self._timeframe_to_range(timeframe)
         ny_tz = ZoneInfo("America/New_York")
@@ -185,10 +201,10 @@ class MassiveClient:
         session = "rth" if settings.RTH_ONLY else "all"
         approx_minutes = limit * multiplier
         from_dt = now - timedelta(minutes=approx_minutes * 2)
-        to_date = now.date().isoformat()
+        to_dt = now
 
         def normalize_bars(raw: List[Dict[str, Any]] | Dict[str, Any]) -> List[Dict[str, Any]]:
-            raw_bars = raw.get("results", raw) if isinstance(raw, dict) else raw
+            raw_bars = self._extract_list(raw, ("results", "data", "bars", "candles"))
             normalized: List[Dict[str, Any]] = []
             for bar in raw_bars or []:
                 normalized_bar = dict(bar)
@@ -274,14 +290,18 @@ class MassiveClient:
 
         last_bars: List[Dict[str, Any]] = []
         for idx, attempt_days in enumerate(attempts):
+            attempt_from_dt = now - timedelta(days=attempt_days)
             data = self._request(
                 "GET",
                 path,
                 params={
-                    "timeframe": timeframe,
+                    "multiplier": multiplier,
+                    "timespan": timespan,
+                    "from": attempt_from_dt.isoformat(),
+                    "to": to_dt.isoformat(),
                     "limit": limit,
-                    "days": attempt_days,
                     "session": session,
+                    "sort": "asc",
                 },
                 symbol=symbol,
             )
@@ -338,7 +358,7 @@ class MassiveClient:
         if self.provider == "polygon":
             path = f"/v2/snapshot/locale/us/markets/stocks/tickers/{symbol}"
         else:
-            path = f"/markets/{symbol}/snapshot"
+            path = f"/v1/markets/{symbol}/snapshot"
 
         data = self._request(
             "GET",
@@ -351,7 +371,10 @@ class MassiveClient:
         if not isinstance(data, dict):
             return {"avg_daily_volume": None, "volume": None, "iv_percentile": None, "raw": data}
 
-        ticker_data = data.get("ticker") if isinstance(data.get("ticker"), dict) else None
+        if isinstance(data.get("data"), dict):
+            ticker_data = data.get("data")
+        else:
+            ticker_data = data.get("ticker") if isinstance(data.get("ticker"), dict) else None
         if ticker_data is None:
             ticker_data = data if isinstance(data, dict) else None
 
@@ -379,17 +402,26 @@ class MassiveClient:
         return snapshot
 
     def get_quote(self, symbol: str) -> Dict[str, Any]:
-        data = self._request("GET", f"/markets/{symbol}/quote", symbol=symbol)
+        path = f"/v1/markets/{symbol}/quote" if self.provider == "massive" else f"/v2/last/trade/{symbol}"
+        data = self._request("GET", path, symbol=symbol)
         return data or {}
 
     def get_option_expirations(self, symbol: str) -> List[str]:
-        path = "/v3/reference/options/contracts"
-        params: Dict[str, Any] = {
-            "underlying_ticker": symbol,
-            "expired": "false",
-            "limit": 1000,
-            "sort": "expiration_date",
-        }
+        if self.provider == "polygon":
+            path = "/v3/reference/options/contracts"
+            params: Dict[str, Any] = {
+                "underlying_ticker": symbol,
+                "expired": "false",
+                "limit": 1000,
+                "sort": "expiration_date",
+            }
+        else:
+            path = "/v1/options/expirations"
+            params = {
+                "symbol": symbol,
+                "include_expired": False,
+                "limit": 500,
+            }
 
         expirations: set[str] = set()
         next_path: str | None = path
@@ -399,8 +431,17 @@ class MassiveClient:
             data = self._request("GET", next_path, params=next_params, symbol=symbol)
             if not data:
                 break
-            for contract in data.get("results", []) or []:
-                exp = contract.get("expiration_date")
+            results = self._extract_list(data, ("results", "data", "expirations"))
+            if results:
+                for contract in results:
+                    if isinstance(contract, str):
+                        expirations.add(contract)
+                        continue
+                    exp = contract.get("expiration_date") or contract.get("expiration")
+                    if exp:
+                        expirations.add(exp)
+            elif isinstance(data, dict):
+                exp = data.get("expiration_date") or data.get("expiration")
                 if exp:
                     expirations.add(exp)
 
@@ -414,14 +455,23 @@ class MassiveClient:
         return sorted(expirations)
 
     def get_option_chain(self, symbol: str, expiration: str) -> List[Dict[str, Any]]:
-        path = "/v3/reference/options/contracts"
-        params: Dict[str, Any] = {
-            "underlying_ticker": symbol,
-            "expired": "false",
-            "expiration_date": expiration,
-            "limit": 1000,
-            "sort": "strike_price",
-        }
+        if self.provider == "polygon":
+            path = "/v3/reference/options/contracts"
+            params: Dict[str, Any] = {
+                "underlying_ticker": symbol,
+                "expired": "false",
+                "expiration_date": expiration,
+                "limit": 1000,
+                "sort": "strike_price",
+            }
+        else:
+            path = "/v1/options/contracts"
+            params = {
+                "symbol": symbol,
+                "expiration": expiration,
+                "limit": 1000,
+                "sort": "strike_price",
+            }
 
         contracts: List[Dict[str, Any]] = []
         next_path: str | None = path
@@ -431,7 +481,7 @@ class MassiveClient:
             data = self._request("GET", next_path, params=next_params, symbol=symbol)
             if not data:
                 break
-            for contract in data.get("results", []) or []:
+            for contract in self._extract_list(data, ("results", "data", "contracts")):
                 contracts.append(
                     {
                         "ticker": contract.get("ticker") or contract.get("contract_symbol"),

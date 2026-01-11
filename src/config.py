@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     BASE_URL: str | None = None
     MASSIVE_API_BASE_URL: str = Field(
         default="https://api.massive.com",
-        validation_alias=AliasChoices("MASSIVE_API_BASE_URL", "MASSIVE_BASE_URL"),
+        validation_alias=AliasChoices("MASSIVE_API_BASE_URL"),
     )
     DATABASE_URL: str
     TELEGRAM_ENABLED: bool = Field(default=False)
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     MIN_CONFIDENCE_TO_ALERT: float = 7.0
     TIMEZONE: str = "America/New_York"
 
-    MASSIVE_BARS_PATH_TEMPLATE: str = "/markets/{symbol}/bars"
+    MASSIVE_BARS_PATH_TEMPLATE: str = "/v1/markets/{symbol}/bars"
 
     MIN_AVG_DAILY_VOLUME: int = 5_000_000
     MIN_PRICE: float = 10.0
