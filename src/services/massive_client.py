@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import os
 import time
 from datetime import datetime, timedelta
@@ -198,10 +197,10 @@ class MassiveClient:
         multiplier, timespan = self._timeframe_to_range(timeframe)
         ny_tz = ZoneInfo("America/New_York")
         now = datetime.now(ny_tz)
-        session = "rth" if settings.RTH_ONLY else "all"
         approx_minutes = limit * multiplier
         from_dt = now - timedelta(minutes=approx_minutes * 2)
         to_dt = now
+        to_date = to_dt.date().isoformat()
 
         def normalize_bars(raw: List[Dict[str, Any]] | Dict[str, Any]) -> List[Dict[str, Any]]:
             raw_bars = self._extract_list(raw, ("results", "data", "bars", "candles"))
@@ -217,49 +216,50 @@ class MassiveClient:
                 normalized.append(normalized_bar)
             return normalized
 
-        if self.provider == "polygon":
-            def _ts_key(bar: Dict[str, Any]) -> Any:
-                ts = bar.get("t") or bar.get("ts") or bar.get("timestamp")
-                if isinstance(ts, datetime):
+        def _ts_key(bar: Dict[str, Any]) -> Any:
+            ts = bar.get("t") or bar.get("ts") or bar.get("timestamp")
+            if isinstance(ts, datetime):
+                return ts
+            if isinstance(ts, str):
+                try:
+                    return datetime.fromisoformat(ts)
+                except Exception:  # noqa: BLE001
                     return ts
-                if isinstance(ts, str):
-                    try:
-                        return datetime.fromisoformat(ts)
-                    except Exception:  # noqa: BLE001
-                        return ts
-                return ts or 0
+            return ts or 0
 
-            def fetch_polygon_bars(from_date: str, api_limit: int) -> List[Dict[str, Any]]:
-                path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-                params = {"adjusted": True, "sort": "desc", "limit": api_limit}
-                data = self._request(
-                    "GET",
-                    path,
-                    params=params,
-                    symbol=symbol,
-                )
-                bars = normalize_bars(data)
-                sorted_bars = sorted(bars, key=_ts_key)
-                from_dt_parsed = datetime.fromisoformat(from_date).date()
-                to_dt_parsed = datetime.fromisoformat(to_date).date()
-                requested_range_days = (to_dt_parsed - from_dt_parsed).days + 1
-                sliced = sorted_bars[-limit:]
-                logger.info(
-                    "bars fetched | symbol={symbol} provider=polygon timeframe={tf} "
-                    "requested={requested} raw_returned={raw_returned} "
-                    "final_returned={final_returned} from={from_date} to={to_date} "
-                    "requested_range_days={requested_range_days}",
-                    symbol=symbol,
-                    tf=timeframe,
-                    requested=limit,
-                    raw_returned=len(sorted_bars),
-                    final_returned=len(sliced),
-                    from_date=from_date,
-                    to_date=to_date,
-                    requested_range_days=requested_range_days,
-                )
-                return sorted_bars
+        def fetch_polygon_bars(from_date: str, api_limit: int) -> List[Dict[str, Any]]:
+            path = f"/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+            params = {"adjusted": True, "sort": "desc", "limit": api_limit}
+            data = self._request(
+                "GET",
+                path,
+                params=params,
+                symbol=symbol,
+            )
+            bars = normalize_bars(data)
+            sorted_bars = sorted(bars, key=_ts_key)
+            from_dt_parsed = datetime.fromisoformat(from_date).date()
+            to_dt_parsed = datetime.fromisoformat(to_date).date()
+            requested_range_days = (to_dt_parsed - from_dt_parsed).days + 1
+            sliced = sorted_bars[-limit:]
+            logger.info(
+                "bars fetched | symbol={symbol} provider={provider} timeframe={tf} "
+                "requested={requested} raw_returned={raw_returned} "
+                "final_returned={final_returned} from={from_date} to={to_date} "
+                "requested_range_days={requested_range_days}",
+                symbol=symbol,
+                provider=self.provider,
+                tf=timeframe,
+                requested=limit,
+                raw_returned=len(sorted_bars),
+                final_returned=len(sliced),
+                from_date=from_date,
+                to_date=to_date,
+                requested_range_days=requested_range_days,
+            )
+            return sorted_bars
 
+        if self.provider in {"polygon", "massive"}:
             min_bars_setting = getattr(settings, "MIN_BARS", limit)
             desired_min = min(limit, max(min_bars_setting, 10))
             api_limit = max(limit * 3, limit)
@@ -277,75 +277,7 @@ class MassiveClient:
 
             return bars[-limit:]
 
-        minutes_per_day = 390 if session == "rth" else 24 * 60
-        bars_per_day = max(1, minutes_per_day // multiplier)
-        days = max(1, math.ceil(limit / bars_per_day))
-        path = self.bars_path_template.format(symbol=symbol)
-
-        attempts = [days]
-        if days < 5:
-            attempts.append(5)
-        if days < 10:
-            attempts.append(10)
-
-        last_bars: List[Dict[str, Any]] = []
-        for idx, attempt_days in enumerate(attempts):
-            attempt_from_dt = now - timedelta(days=attempt_days)
-            data = self._request(
-                "GET",
-                path,
-                params={
-                    "multiplier": multiplier,
-                    "timespan": timespan,
-                    "from": attempt_from_dt.isoformat(),
-                    "to": to_dt.isoformat(),
-                    "limit": limit,
-                    "session": session,
-                    "sort": "asc",
-                },
-                symbol=symbol,
-            )
-            if data is None:
-                logger.warning(
-                    "bars fetch returned no data",
-                    provider=self.provider,
-                    symbol=symbol,
-                    days=attempt_days,
-                    path=path,
-                )
-                return []
-
-            last_bars = normalize_bars(data)
-            returned = len(last_bars)
-            logger.info(
-                "bars fetched | symbol={symbol} provider=massive timeframe={tf} "
-                "requested={requested} returned={returned} days={days} session={session}",
-                symbol=symbol,
-                tf=timeframe,
-                requested=limit,
-                returned=returned,
-                days=attempt_days,
-                session=session,
-            )
-
-            has_enough = returned >= limit
-            is_last_attempt = idx == len(attempts) - 1
-            if has_enough or is_last_attempt:
-                break
-
-            next_days = attempts[idx + 1]
-            if returned < limit:
-                logger.info(
-                    "bars refetch | symbol={symbol} requested={requested} returned={returned} "
-                    "days={current} -> days={next_days}",
-                    symbol=symbol,
-                    requested=limit,
-                    returned=returned,
-                    current=attempt_days,
-                    next_days=next_days,
-                )
-
-        return last_bars[-limit:]
+        raise ValueError(f"Unsupported provider for get_bars: {self.provider}")
 
     def _timeframe_to_range(self, timeframe: str) -> tuple[int, str]:
         if timeframe == "1m":
