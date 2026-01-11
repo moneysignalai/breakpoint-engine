@@ -66,6 +66,12 @@ class MassiveClient:
             safe_params.pop(key, None)
         return safe_params
 
+    def _safe_url(self, url: str, params: Mapping[str, Any] | None) -> str:
+        try:
+            return str(httpx.URL(url).copy_with(params=params or {}))
+        except Exception:  # noqa: BLE001
+            return url.split("?")[0]
+
     def _request(
         self,
         method: str,
@@ -73,6 +79,7 @@ class MassiveClient:
         params: dict | None = None,
         *,
         symbol: str | None = None,
+        stage: str | None = None,
         run_id: str | None = None,
         raise_for_status: bool = False,
     ) -> Any:
@@ -90,13 +97,17 @@ class MassiveClient:
                 response = self.client.request(method, url, params=request_params)
             except httpx.RequestError as exc:
                 elapsed_ms = int((time.perf_counter() - start) * 1000)
+                safe_params = self._safe_params(request_params)
+                safe_url = self._safe_url(url, safe_params)
                 logger.warning(
                     "Massive request error",
                     provider=self.provider,
                     path=endpoint,
-                    url=url,
-                    params=self._safe_params(request_params) or None,
+                    endpoint=endpoint,
+                    url=safe_url,
+                    params=safe_params or None,
                     symbol=symbol,
+                    stage=stage,
                     elapsed_ms=elapsed_ms,
                     error=str(exc),
                     run_id=run_id,
@@ -113,6 +124,7 @@ class MassiveClient:
             snippet = (response.text or "")[:500]
             full_url = str(response.request.url) if response.request else url
             safe_params = self._safe_params(request_params)
+            safe_url = self._safe_url(full_url, safe_params)
 
             if status_code == 404:
                 logger.warning(
@@ -120,9 +132,12 @@ class MassiveClient:
                     method=method,
                     provider=self.provider,
                     path=endpoint,
-                    url=full_url,
+                    endpoint=endpoint,
+                    url=safe_url,
                     params=safe_params or None,
                     symbol=symbol,
+                    stage=stage,
+                    status=status_code,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     body_snippet=snippet,
@@ -143,8 +158,11 @@ class MassiveClient:
                     method=method,
                     provider=self.provider,
                     path=endpoint,
-                    url=full_url,
+                    endpoint=endpoint,
+                    url=safe_url,
                     symbol=symbol,
+                    stage=stage,
+                    status=status_code,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     body_snippet=snippet,
@@ -161,9 +179,12 @@ class MassiveClient:
                     error_code="massive_http_error",
                     method=method,
                     provider=self.provider,
-                    url=full_url,
+                    endpoint=endpoint,
+                    url=safe_url,
                     params=safe_params or None,
                     symbol=symbol,
+                    stage=stage,
+                    status=status_code,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     body_snippet=snippet,
@@ -186,7 +207,9 @@ class MassiveClient:
                 "Massive request ok",
                 method=method,
                 path=endpoint,
+                endpoint=endpoint,
                 symbol=symbol,
+                stage=stage,
                 status_code=status_code,
                 elapsed_ms=elapsed_ms,
                 run_id=run_id,
@@ -199,6 +222,7 @@ class MassiveClient:
                     provider=self.provider,
                     path=endpoint,
                     symbol=symbol,
+                    stage=stage,
                     status_code=status_code,
                     elapsed_ms=elapsed_ms,
                     response_snippet=snippet,
@@ -235,6 +259,7 @@ class MassiveClient:
         timeframe: str,
         limit: int,
         adjusted: bool = True,
+        stage: str | None = "bars",
         run_id: str | None = None,
     ) -> List[Bar]:
         if timeframe != "5m":
@@ -254,7 +279,14 @@ class MassiveClient:
             "limit": limit * 4,
         }
 
-        data = self._request("GET", path, params=params, symbol=symbol, run_id=run_id)
+        data = self._request(
+            "GET",
+            path,
+            params=params,
+            symbol=symbol,
+            stage=stage,
+            run_id=run_id,
+        )
         results = data.get("results") if isinstance(data, dict) else None
         bars: List[Bar] = []
         for r in results or []:
@@ -281,6 +313,7 @@ class MassiveClient:
             "GET",
             path,
             symbol=symbol,
+            stage="daily_snapshot",
         )
 
         if data is None:
@@ -320,7 +353,13 @@ class MassiveClient:
 
     def get_quote(self, symbol: str) -> Dict[str, Any]:
         path = f"/v3/snapshot/stocks/{symbol}"
-        data = self._request("GET", path, symbol=symbol, raise_for_status=True)
+        data = self._request(
+            "GET",
+            path,
+            symbol=symbol,
+            stage="quote",
+            raise_for_status=True,
+        )
         return data or {}
 
     def get_option_expirations(self, symbol: str) -> List[str]:
@@ -345,7 +384,13 @@ class MassiveClient:
         next_params: Dict[str, Any] | None = params
 
         while next_path:
-            data = self._request("GET", next_path, params=next_params, symbol=symbol)
+            data = self._request(
+                "GET",
+                next_path,
+                params=next_params,
+                symbol=symbol,
+                stage="options_expirations",
+            )
             if not data:
                 break
             results = self._extract_list(data, ("results", "data", "expirations"))
@@ -395,7 +440,13 @@ class MassiveClient:
         next_params: Dict[str, Any] | None = params
 
         while next_path:
-            data = self._request("GET", next_path, params=next_params, symbol=symbol)
+            data = self._request(
+                "GET",
+                next_path,
+                params=next_params,
+                symbol=symbol,
+                stage="options_chain",
+            )
             if not data:
                 break
             for contract in self._extract_list(data, ("results", "data", "contracts")):

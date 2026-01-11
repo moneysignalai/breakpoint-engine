@@ -123,6 +123,24 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             return bar.volume
         return bar.get("v") or bar.get("volume") or 0
 
+    def extract_bar_ts(bar: Bar | Dict[str, Any]) -> datetime | None:
+        ts_value = getattr(bar, "ts", None)
+        if ts_value is None and isinstance(bar, dict):
+            ts_value = bar.get("ts") or bar.get("t") or bar.get("timestamp")
+        if ts_value is None:
+            return None
+        if isinstance(ts_value, datetime):
+            return ts_value
+        if isinstance(ts_value, (int, float)):
+            return datetime.fromtimestamp(ts_value / 1000, tz=timezone.utc)
+        ts_str = str(ts_value)
+        if ts_str.endswith("Z"):
+            ts_str = ts_str.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(ts_str)
+        except ValueError:
+            return None
+
     def reason_from_exception(exc: Exception) -> str:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         if isinstance(exc, MassiveNotFoundError):
@@ -351,7 +369,10 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
             try:
                 market_bars_start = time.perf_counter()
                 market_bars = client.get_bars(
-                    market_symbol, timeframe="5m", limit=settings.BOX_BARS * 3
+                    market_symbol,
+                    timeframe="5m",
+                    limit=settings.BOX_BARS * 3,
+                    stage="market_bars",
                 )
                 logger.info(
                     "market bars fetched",
@@ -424,7 +445,10 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 requested_limit = settings.BOX_BARS * 3
                 try:
                     bars = client.get_bars(
-                        symbol, timeframe="5m", limit=requested_limit
+                        symbol,
+                        timeframe="5m",
+                        limit=requested_limit,
+                        stage="bars",
                     )
                 except (
                     httpx.HTTPStatusError,
@@ -585,10 +609,28 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     return chain
 
                 try:
-                    bars_ts = (
-                        bars[-1]["ts"]
-                        if isinstance(bars[-1]["ts"], datetime)
-                        else datetime.fromisoformat(bars[-1]["ts"])
+                    if not bars:
+                        skip_reasons["no_bars"] += 1
+                        logger.warning(
+                            "no bars available for optimizer timestamp",
+                            symbol=symbol,
+                        )
+                        continue
+                    last_bar = bars[-1]
+                    bars_ts = extract_bar_ts(last_bar)
+                    if bars_ts is None:
+                        skip_reasons["no_bars"] += 1
+                        logger.warning(
+                            "last bar missing ts field, skipping optimizer",
+                            symbol=symbol,
+                            last_bar=repr(last_bar),
+                        )
+                        continue
+                    logger.info(
+                        "optimizer start",
+                        symbol=symbol,
+                        bars=len(bars),
+                        expirations=len(expirations),
                     )
                     opt_result = optimizer.run(
                         symbol,
