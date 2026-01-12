@@ -6,7 +6,7 @@ import platform
 import random
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Tuple
 
@@ -88,6 +88,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     universe_count = len(universe)
     scanned_count = 0
     triggered_count = 0
+    alerts_attempted = 0
     idea_alerts_sent = 0
     error_count = 0
     bars_404_count = 0
@@ -96,13 +97,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     tz = ZoneInfo(settings.TIMEZONE)
     now = datetime.now(tz)
     dev_test_mode = bool(getattr(settings, "DEV_TEST_MODE", False))
-    effective_confidence_threshold = (
-        max(0.0, settings.MIN_CONFIDENCE_TO_ALERT - 0.5)
-        if dev_test_mode
-        else settings.MIN_CONFIDENCE_TO_ALERT
-    )
+    effective_confidence_threshold = settings.MIN_CONFIDENCE_TO_ALERT
+    if dev_test_mode:
+        effective_confidence_threshold = max(0.0, effective_confidence_threshold - 0.5)
     if settings.DEBUG_LENIENT_MODE:
-        effective_confidence_threshold = min(effective_confidence_threshold, 3.0)
+        effective_confidence_threshold = max(2.0, effective_confidence_threshold - 0.5)
         logger.warning(
             "DEBUG_LENIENT_MODE enabled, relaxed confidence threshold",
             confidence_threshold=effective_confidence_threshold,
@@ -117,6 +116,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
     market_symbol: str | None = None
     market_bars: List[Bar | Dict[str, Any]] = []
     total_raw_signals = 0
+    outside_alert_window = False
+    recent_alert_symbols: set[str] = set()
 
     def bar_volume(bar: Bar | Dict[str, Any]) -> float:
         if isinstance(bar, Bar):
@@ -212,18 +213,18 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         avg_score = sum(scores) / len(scores)
         above = sum(1 for _, score, _ in candidate_scores if score >= effective_confidence_threshold)
         below = len(candidate_scores) - above
-        bin_ranges = [(round(i / 5, 1), round((i + 1) / 5, 1)) for i in range(5)]
+        bin_ranges = [(i, i + 1) for i in range(0, 10)]
         bins_struct = []
         for start, end in bin_ranges:
             count = sum(
                 1
                 for _, score, _ in candidate_scores
-                if start <= score < end or (end == 1.0 and score <= end)
+                if start <= score < end or (end == 10 and score <= end)
             )
             bins_struct.append({"start": start, "end": end, "count": count})
         bin_summary = _safe_kv_summary(
             [
-                (f"{bin_info['start']:.1f}-{bin_info['end']:.1f}", bin_info["count"])
+                (f"{bin_info['start']:.0f}-{bin_info['end']:.0f}", bin_info["count"])
                 for bin_info in bins_struct
             ]
         )
@@ -295,6 +296,11 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         decision_reason=decision_reason,
         window_bounds=[{"start": s.isoformat(), "end": e.isoformat()} for s, e in windows],
     )
+    logger.info(
+        "telegram config",
+        enabled=settings.TELEGRAM_ENABLED,
+        chat_id=settings.TELEGRAM_CHAT_ID,
+    )
 
     min_bars_required = strategy.min_bars_for_window(window_label)
     logger.info(
@@ -303,6 +309,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
         dev_test_mode=dev_test_mode,
         alert_mode=settings.ALERT_MODE,
         confidence_threshold=effective_confidence_threshold,
+        base_confidence_threshold=settings.MIN_CONFIDENCE_TO_ALERT,
+        debug_lenient_mode=settings.DEBUG_LENIENT_MODE,
     )
     result: Dict[str, Any] = {"alerts": alerts_triggered, "notes": scan_notes}
     scan_run: ScanRun | None = None
@@ -363,6 +371,29 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 rth_only=settings.RTH_ONLY,
                 scan_outside_window=settings.SCAN_OUTSIDE_WINDOW,
             )
+            outside_alert_window = not config_window_allowed
+
+            if db_persist_available and settings.MINUTES_BETWEEN_SAME_TICKER > 0:
+                cutoff = datetime.utcnow() - timedelta(minutes=settings.MINUTES_BETWEEN_SAME_TICKER)
+                try:
+                    recent_alerts = (
+                        session.query(Alert.symbol)
+                        .filter(Alert.created_at >= cutoff)
+                        .filter(Alert.symbol.in_(universe))
+                        .distinct()
+                        .all()
+                    )
+                    recent_alert_symbols = {row[0] for row in recent_alerts}
+                    logger.info(
+                        "cooldown snapshot",
+                        window_minutes=settings.MINUTES_BETWEEN_SAME_TICKER,
+                        recent_symbols=len(recent_alert_symbols),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "cooldown lookup failed",
+                        error=str(exc),
+                    )
 
             market_symbol = "QQQ"
             market_bars: List[Bar | Dict[str, Any]] = []
@@ -507,6 +538,8 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     fallback_bars_count = min(fallback_bars_count or len(bars), 100)
                     bars_raw_tail = bars[-fallback_bars_count:]
                     bars_total_volume = sum(bar_volume(bar) for bar in bars_raw_tail)
+                    # Approximate avg daily volume from recent intraday bars.
+                    # Tune MIN_AVG_DAILY_VOLUME if this proxy underestimates liquid tickers.
                     est_avg_daily_volume = max(bars_total_volume, 1) * 3
                     daily = {
                         "avg_daily_volume": est_avg_daily_volume,
@@ -568,6 +601,24 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     direction=idea.direction,
                     confidence=idea.confidence,
                 )
+
+                if outside_alert_window and settings.SCAN_OUTSIDE_WINDOW:
+                    trace.mark_skip(
+                        "outside_allowed_window",
+                        {
+                            "now": now.time(),
+                            "windows": settings.ALLOWED_WINDOWS,
+                        },
+                    )
+                    skip_reasons["outside_allowed_window"] += 1
+                    logger.info(
+                        "strategy skipped | reason=outside_allowed_window",
+                        symbol=symbol,
+                        reason="outside_allowed_window",
+                        window_label=window_label,
+                        allowed_windows=settings.ALLOWED_WINDOWS,
+                    )
+                    continue
 
                 expirations_start = time.perf_counter()
                 try:
@@ -695,6 +746,39 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         )
                     continue
 
+                if settings.MINUTES_BETWEEN_SAME_TICKER > 0 and symbol in recent_alert_symbols:
+                    trace.mark_skip(
+                        "cooldown_same_ticker",
+                        {
+                            "minutes": settings.MINUTES_BETWEEN_SAME_TICKER,
+                            "symbol": symbol,
+                        },
+                    )
+                    skip_reasons["cooldown_same_ticker"] += 1
+                    logger.info(
+                        "strategy skipped | reason=cooldown_same_ticker",
+                        symbol=symbol,
+                        reason="cooldown_same_ticker",
+                    )
+                    continue
+
+                if alerts_attempted >= settings.MAX_ALERTS_PER_SCAN:
+                    trace.mark_skip(
+                        "max_alerts_per_scan",
+                        {
+                            "attempted": alerts_attempted,
+                            "max_alerts": settings.MAX_ALERTS_PER_SCAN,
+                        },
+                    )
+                    skip_reasons["max_alerts_per_scan"] += 1
+                    logger.warning(
+                        "max alerts per scan reached, suppressing signal",
+                        symbol=symbol,
+                        attempted=alerts_attempted,
+                        max_alerts=settings.MAX_ALERTS_PER_SCAN,
+                    )
+                    continue
+
                 if settings.DEBUG_LENIENT_MODE and triggered_count >= settings.DEBUG_MAX_ALERTS_PER_SCAN:
                     trace.mark_skip(
                         "lenient_max_alerts",
@@ -733,6 +817,9 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 if alert_label != "TRADE":
                     effective_alert_mode = "WATCHLIST"
                 computed = trace.computed
+                reasons = []
+                if isinstance(getattr(idea, "debug", None), dict):
+                    reasons = idea.debug.get("notes") or []
                 alert_dict = {
                     "symbol": symbol,
                     "direction": idea.direction,
@@ -741,6 +828,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                     "alert_label": alert_label,
                     "window_label": window_label,
                     "expected_window": idea.expected_window,
+                    "reasons": reasons,
                     "entry": idea.entry,
                     "stop": idea.stop,
                     "t1": idea.t1,
@@ -784,6 +872,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 texts = alert_service.build_alert_texts(
                     alert_dict, option_payloads if option_payloads else None
                 )
+                alerts_attempted += 1
                 if settings.DEBUG_MODE:
                     status_code, tg_resp = None, "debug-mode"
                     sent_success = False
@@ -811,7 +900,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                         reason = f"status_code={status_code}"
                     else:
                         reason = "ok"
-                    if not sent_success:
+                    if not sent_success and reason not in {"telegram-disabled", "telegram-missing-config"}:
                         record_symbol_error("alert_send", RuntimeError(reason))
                     result_label = "sent" if sent_success else "failed"
                     message = (
@@ -873,6 +962,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 )
                 if sent_success:
                     triggered_count += 1
+                    recent_alert_symbols.add(symbol)
                 if alert_label == "IDEA":
                     idea_alerts_sent += 1
             except Exception as exc:  # noqa: BLE001

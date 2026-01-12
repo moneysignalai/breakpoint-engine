@@ -159,6 +159,9 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `DATABASE_URL` – SQLAlchemy connection string (required).
 - `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` – delivery controls.
 - `DEBUG_MODE` – compute and log strategies but suppress Telegram sends; still logs top candidates per scan.
+- `DEBUG_SYMBOL` – restrict scans to a single symbol for debugging.
+- `DEBUG_LENIENT_MODE` – relax strategy gates and confidence thresholds for validation runs.
+- `DEBUG_MAX_ALERTS_PER_SCAN` – hard cap on alerts per scan when debug lenient mode is enabled.
 - `TEST_ALERT_ON_START` – send a one-time startup Telegram confirming provider/base URL and scan settings.
 - `SCAN_INTERVAL_SECONDS` – worker cadence.
 - `UNIVERSE` – comma-separated symbols scanned each cycle.
@@ -166,10 +169,13 @@ All settings are defined in `src/config.py` (Pydantic). Key variables:
 - `ALERT_MODE` – `TRADE` (default, RTH-only live alerts) or `WATCHLIST` (always allowed, marked non-executable).
 - `DEV_TEST_MODE` – lowers thresholds slightly for validation runs and allows IDEA/watchlist alerts.
 - `MIN_CONFIDENCE_TO_ALERT` – gating threshold for sending alerts.
-- `MIN_AVG_DAILY_VOLUME`, `MIN_PRICE`, `MAX_PRICE` – base liquidity and price filters.
-- `BOX_BARS`, `BOX_MAX_RANGE_PCT`, `ATR_COMP_FACTOR`, `VOL_CONTRACTION_FACTOR`, `BREAK_BUFFER_PCT`, `MAX_EXTENSION_PCT`, `BREAK_VOL_MULT`, `VWAP_CONFIRM` – flagship setup parameters.
-- `SPREAD_PCT_MAX`, `MIN_OPT_VOLUME`, `MIN_OPT_OI`, `MIN_OPT_MID`, `IV_PCTL_MAX_FOR_AGG`, `IV_PCTL_MAX_FOR_ANY` – options eligibility thresholds.
+- `MAX_ALERTS_PER_SCAN` – cap on total alert attempts per scan.
+- `MINUTES_BETWEEN_SAME_TICKER` – per-ticker cooldown window in minutes.
+- `MIN_AVG_DAILY_VOLUME`, `MIN_PRICE`, `MAX_PRICE` – base liquidity and price filters; lower volume if Massive averages under-report for liquid names.
+- `BOX_BARS`, `MIN_BARS_RTH`, `MIN_BARS_NON_RTH`, `BOX_MAX_RANGE_PCT`, `ATR_COMP_FACTOR`, `VOL_CONTRACTION_FACTOR`, `BREAK_BUFFER_PCT`, `MAX_EXTENSION_PCT`, `BREAK_VOL_MULT`, `VWAP_CONFIRM` – flagship setup parameters.
+- `SPREAD_PCT_MAX`, `MIN_OPT_VOLUME`, `MIN_OPT_OI`, `MIN_OPT_MID`, `IV_PCTL_MAX_FOR_AGG`, `IV_PCTL_MAX_FOR_ANY` – options eligibility thresholds (IV percentiles are 0–1, not 0–100).
 - `ENTRY_BUFFER_PCT`, `STOP_BUFFER_PCT` – execution buffers for entries and stops.
+- `DEBUG_ENDPOINTS_ENABLED`, `DEBUG_TOKEN` – protect debug endpoints in the API service.
 
 ### Provider/Base URL guidance
 - Polygon-style endpoints (`/v2/aggs`, `/v2/snapshot`, `/v3/reference/options/contracts`) require `DATA_PROVIDER=polygon` and typically `MASSIVE_API_BASE_URL=https://api.polygon.io` (defaults to this if unset).
