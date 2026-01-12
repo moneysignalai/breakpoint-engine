@@ -184,6 +184,8 @@ class FlagshipStrategy:
     def _estimate_avg_volume_from_bars(self, bars: List[Bar]) -> float:
         if not bars:
             return 0.0
+        # Estimate average daily volume from the most recent intraday bars.
+        # We sample up to ~3x the box size and scale to a full-day proxy.
         sample = bars[-min(len(bars), self.settings.BOX_BARS * 3):]
         total_volume = sum(b.volume for b in sample)
         return max(total_volume, 0.0) * 3
@@ -534,15 +536,19 @@ class FlagshipStrategy:
         confidence = 7.0
         if market_bias == direction:
             confidence += 0.5
+            trace.add_note("Market bias aligned with breakout direction.")
         if break_vol_mult >= 2.0:
             confidence += 0.5
+            trace.add_note("Breakout volume ≥ 2× box average.")
         candle_range = box[-1].high - box[-1].low
         if candle_range > 0:
             pos_in_range = (box[-1].close - box[-1].low) / candle_range
             if direction == 'LONG' and pos_in_range >= 0.8:
                 confidence += 0.5
+                trace.add_note("Last box candle closed near the high.")
             if direction == 'SHORT' and pos_in_range <= 0.2:
                 confidence += 0.5
+                trace.add_note("Last box candle closed near the low.")
         confidence = cap_score(confidence * panic_penalty)
 
         trace.add_computeds(

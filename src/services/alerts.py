@@ -15,18 +15,35 @@ settings = get_settings()
 
 def send_telegram_message(text: str) -> tuple[int | None, str]:
     enabled = bool(settings.TELEGRAM_ENABLED)
-    logger.info(f"Telegram enabled: {enabled} (TELEGRAM_ENABLED={settings.TELEGRAM_ENABLED})")
     if not enabled:
+        logger.info(
+            "telegram send skipped",
+            reason="telegram-disabled",
+            chat_id=settings.TELEGRAM_CHAT_ID,
+        )
         return None, "telegram-disabled"
     if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
+        logger.warning(
+            "telegram missing config",
+            reason="telegram-missing-config",
+            enabled=enabled,
+            missing_token=not bool(settings.TELEGRAM_BOT_TOKEN),
+            missing_chat_id=not bool(settings.TELEGRAM_CHAT_ID),
+        )
         return None, "telegram-missing-config"
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": settings.TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
         resp = httpx.post(url, json=payload, timeout=10.0)
+        if resp.status_code != 200:
+            logger.error(
+                "telegram send failed",
+                status_code=resp.status_code,
+                response_text=resp.text,
+            )
         return resp.status_code, resp.text
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"Telegram send failed: {exc}")
+        logger.error("telegram send exception", error=str(exc))
         return None, str(exc)
 
 
@@ -42,6 +59,18 @@ def _format_percent(value: Any) -> str:
         return f"{float(value) * 100:.2f}"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _format_compact_int(value: Any) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if num >= 1_000_000:
+        return f"{num / 1_000_000:.1f}M"
+    if num >= 1_000:
+        return f"{num / 1_000:.1f}K"
+    return f"{int(num)}"
 
 
 def _format_delta(value: Any) -> str:
@@ -269,6 +298,7 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
     vwap_ok = alert.get("vwap_ok")
     market_bias = alert.get("market_bias")
     expected_window = alert.get("expected_window")
+    reasons = alert.get("reasons") or []
 
     short_prefix = ""
     if alert_mode == "WATCHLIST" or alert_label not in {"ALERT", "TRADE"}:
@@ -311,15 +341,24 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
             f"· Break: {_format_percent(extension_pct)}% · Vol: {vol_text}×"
         ),
         f"• VWAP: {vwap_text} · Trend: {trend_description}",
-        "",
-        "📈 STOCK PLAN",
-        f"• Entry: {_format_price(entry)} ({entry_phrase})",
-        f"• Invalidation: {_format_price(stop)} (back inside box)",
-        f"• Targets: {_format_price(t1)} → {_format_price(t2)}",
-        f"• Window: {expected_window_text}",
-        "",
-        "🎯 OPTIONS (Weekly / Liquid)",
     ]
+
+    if reasons:
+        reasons_text = "; ".join(str(reason) for reason in reasons[:3])
+        standard_lines.append(f"• Reasons: {reasons_text}")
+
+    standard_lines.extend(
+        [
+            "",
+            "📈 STOCK PLAN",
+            f"• Entry: {_format_price(entry)} ({entry_phrase})",
+            f"• Invalidation: {_format_price(stop)} (back inside box)",
+            f"• Targets: {_format_price(t1)} → {_format_price(t2)}",
+            f"• Window: {expected_window_text}",
+            "",
+            "🎯 OPTIONS (Weekly / Liquid)",
+        ]
+    )
 
     if options:
         tier_map: dict[str, dict[str, Any]] = {}
@@ -371,6 +410,7 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
         f"ATR compression ratio: {_format_price(atr_ratio)}",
         f"VWAP confirmation: {vwap_ok}",
         f"Market bias: {market_bias}",
+        f"Reasons: {', '.join(str(reason) for reason in reasons)}" if reasons else "Reasons: N/A",
         f"Plan: entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)} (conf {confidence:.1f})" if confidence is not None else f"Plan: entry {_format_price(entry)} stop {_format_price(stop)} T1 {_format_price(t1)} T2 {_format_price(t2)}",
     ]
     if options:
@@ -382,7 +422,9 @@ def build_alert_texts(alert: Dict[str, Any], options: list[Dict[str, Any]] | Non
             except (TypeError, ValueError):
                 spread_display_str = "N/A"
             deep_lines.append(
-                f"{opt.get('tier')}: {opt.get('contract_symbol')} mid {_format_mid(opt)} sprd {spread_display_str}% vol {opt.get('volume')} oi {opt.get('oi')} delta {opt.get('delta')}"
+                f"{opt.get('tier')}: {opt.get('contract_symbol')} mid {_format_mid(opt)} "
+                f"sprd {spread_display_str}% vol {_format_compact_int(opt.get('volume'))} "
+                f"oi {_format_compact_int(opt.get('oi'))} delta {opt.get('delta')}"
             )
     deep_lines.append("Exit: Take 40-60% at T1, runner to T2, time stop 30-60m if no continuation, exit on invalidation")
     deep = "\n".join(deep_lines)

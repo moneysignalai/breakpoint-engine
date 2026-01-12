@@ -22,6 +22,14 @@ def validate_runtime_config(settings: Settings) -> None:
     if not settings.MASSIVE_API_KEY:
         raise RuntimeError("Missing MASSIVE_API_KEY")
 
+    if settings.TELEGRAM_ENABLED and (not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID):
+        logger.warning(
+            "Telegram enabled but missing config",
+            enabled=settings.TELEGRAM_ENABLED,
+            missing_token=not bool(settings.TELEGRAM_BOT_TOKEN),
+            missing_chat_id=not bool(settings.TELEGRAM_CHAT_ID),
+        )
+
     if settings.DATA_PROVIDER.lower() == "massive" and "polygon.io" in settings.MASSIVE_API_BASE_URL:
         logger.error(
             "Config mismatch: polygon base url with massive endpoints",
@@ -46,3 +54,10 @@ def validate_runtime_config(settings: Settings) -> None:
         "config scan windows",
         windows=[{"start": start.isoformat(), "end": end.isoformat()} for start, end in windows],
     )
+
+    if settings.RTH_ONLY:
+        logger.warning(
+            "RTH_ONLY is informational; use ALLOWED_WINDOWS/SCAN_OUTSIDE_WINDOW for gating",
+            rth_only=settings.RTH_ONLY,
+            allowed_windows=settings.ALLOWED_WINDOWS,
+        )

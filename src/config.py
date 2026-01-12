@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import List
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,11 +33,13 @@ class Settings(BaseSettings):
     SCAN_OUTSIDE_WINDOW: bool = False
     ALERT_MODE: str = "TRADE"
     MIN_CONFIDENCE_TO_ALERT: float = 7.0
+    MAX_ALERTS_PER_SCAN: int = 6
+    MINUTES_BETWEEN_SAME_TICKER: int = 45
     TIMEZONE: str = "America/New_York"
 
     MASSIVE_BARS_PATH_TEMPLATE: str = "/v1/markets/{symbol}/bars"  # Legacy Massive bars path (unused).
 
-    MIN_AVG_DAILY_VOLUME: int = 5_000_000
+    MIN_AVG_DAILY_VOLUME: int = 5_000_000  # Shares/day; tune down if Massive averages appear lower than expected.
     MIN_PRICE: float = 10.0
     MAX_PRICE: float = 1000.0
     BOX_BARS: int = 12
@@ -54,8 +56,8 @@ class Settings(BaseSettings):
     MIN_OPT_VOLUME: int = 200
     MIN_OPT_OI: int = 500
     MIN_OPT_MID: float = 0.25
-    IV_PCTL_MAX_FOR_AGG: float = 0.70
-    IV_PCTL_MAX_FOR_ANY: float = 0.85
+    IV_PCTL_MAX_FOR_AGG: float = 0.70  # 0-1 range (0.70 == 70th percentile).
+    IV_PCTL_MAX_FOR_ANY: float = 0.85  # 0-1 range (0.85 == 85th percentile).
     ALLOWED_WINDOWS: str = "09:35-11:00,13:30-15:50"
 
     ENTRY_BUFFER_PCT: float = 0.0005
@@ -69,6 +71,15 @@ class Settings(BaseSettings):
         data.pop('MASSIVE_API_KEY', None)
         data.pop('DATABASE_URL', None)
         return data
+
+    @field_validator("IV_PCTL_MAX_FOR_AGG", "IV_PCTL_MAX_FOR_ANY")
+    @classmethod
+    def _validate_iv_percentile(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError(
+                "IV percentile settings must be 0-1 (e.g., 0.70 for 70th percentile)."
+            )
+        return value
 
 
 @lru_cache(maxsize=1)
