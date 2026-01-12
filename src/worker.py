@@ -885,7 +885,7 @@ def run_scan_once(client: MassiveClient | None = None) -> Dict[str, Any]:
                 else:
                     try:
                         status_code, tg_resp = alert_service.send_telegram_message(
-                            texts["short"]
+                            texts["standard"]
                         )
                     except Exception as exc:  # noqa: BLE001
                         record_symbol_error("alert_send", exc)
